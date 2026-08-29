@@ -136,8 +136,14 @@ constants and a maximum error of 7.5e-8. It is *an approximation, chosen deliber
 follow.
 
 A port that keeps the same approximation with the same constants in the same order **can** be
-bit-identical, because IEEE-754 arithmetic is deterministic. Byte-identity is an achievable bar
-here, not an aspiration.
+bit-identical — with one precondition stated exactly. IEEE-754 mandates correct rounding for
+`+ − × ÷ √`; it mandates no such thing for `exp` and `log`, whose last-ulp behaviour is
+implementation-defined. Bit-identity therefore requires the same transcendental implementations
+too: this fixture pins the kernel *and* Zig's bundled `exp`/`log` (the no-libc note below). A
+port against a different libm — glibc's `exp`, a JS engine's `Math.exp` — should expect to lose
+a fraction of rows by an ulp upstream, magnified through the `F·N(d1) − K·N(d2)` cancellation.
+That is not the port failing, and not the fixture being pedantic; that is the fixture reporting
+that the numerics moved. On this toolchain, byte-identity is an achievable bar, not an aspiration.
 
 A port that substitutes something better is **a different model**, and it deserves a decision by
 someone who owns the P&L — not a silent side effect of a language change. A tolerance band wide
