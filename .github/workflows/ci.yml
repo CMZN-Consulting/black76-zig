@@ -1,0 +1,66 @@
+# The gate this repository exists to be, run on itself.
+#
+# No third-party actions: the Zig toolchain is fetched from ziglang.org at a
+# pinned version and checked by hand. Fewer moving parts, and nothing to trust
+# that you cannot read here.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  ZIG_VERSION: "0.16.0"
+
+jobs:
+  check:
+    name: "${{ matrix.arch }}"
+    runs-on: ${{ matrix.runner }}
+    # The aarch64 job is the open question this repo is honest about: the golden
+    # vectors were captured on x86_64, and whether a different architecture
+    # reproduces them bit-for-bit has never been tested. It runs, it reports,
+    # and it does not gate -- a red mark there would be a FINDING about the
+    # kernel, not a broken build, and it should be read as one.
+    continue-on-error: ${{ matrix.informational }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: "x86_64"
+            runner: "ubuntu-latest"
+            zig_target: "x86_64"
+            informational: false
+          - arch: "aarch64 (informational, the open question)"
+            runner: "ubuntu-24.04-arm"
+            zig_target: "aarch64"
+            informational: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        run: |
+          set -euo pipefail
+          url="https://ziglang.org/download/${ZIG_VERSION}/zig-${{ matrix.zig_target }}-linux-${ZIG_VERSION}.tar.xz"
+          echo "fetching $url"
+          curl -fsSL "$url" -o zig.tar.xz
+          mkdir -p "$HOME/zig" && tar -xJf zig.tar.xz -C "$HOME/zig" --strip-components=1
+          echo "$HOME/zig" >> "$GITHUB_PATH"
+
+      - name: Toolchain is the pinned one
+        run: |
+          set -euo pipefail
+          zig version
+          test "$(zig version)" = "${ZIG_VERSION}"
+
+      - name: Formatting
+        run: zig fmt --check .
+
+      - name: Replay the golden vectors
+        run: zig build test
+
+      - name: Re-capture and diff against the committed fixture
+        run: zig build reproduce
+
+      - name: Build the library
+        run: zig build -Doptimize=ReleaseFast

@@ -1,0 +1,21 @@
+.{
+    .name = .black76_zig,
+    .version = "1.0.0",
+    // Hard pin. The golden vectors are captured by a specific compiler; a
+    // different one is allowed to disagree, and the point of this repo is that
+    // you find out rather than assume. See README, "What the fixture is
+    // actually pinned to".
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0xaed6fc1f6a064a2d,
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "tools",
+        "tests",
+        "vectors",
+        "LICENSE",
+        "README.md",
+    },
+    .dependencies = .{},
+}
