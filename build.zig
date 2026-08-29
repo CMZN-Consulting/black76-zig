@@ -4,11 +4,20 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // In-repo exp/log, lane-generic. The kernel's numbers depend on these and
+    // on nothing outside this repository.
+    const libm_mod = b.createModule(.{
+        .root_source_file = b.path("src/libm.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // -- The kernel, as a module and as a C-ABI library ----------------------
     const b76_mod = b.createModule(.{
         .root_source_file = b.path("src/black76.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{.{ .name = "libm", .module = libm_mod }},
     });
 
     // Shared object: dlopen this and call black76_greeks / black76_greeks_batch.
@@ -19,13 +28,15 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(shared);
 
-    // Static archive, for hosts that would rather link it in.
+    // Static archive, for hosts that would rather link it in. A library needs
+    // its own root module, so this is the kernel a second time.
     const static = b.addLibrary(.{
         .name = "black76",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/black76.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{.{ .name = "libm", .module = libm_mod }},
         }),
         .linkage = .static,
     });
@@ -77,9 +88,22 @@ pub fn build(b: *std.Build) void {
     const golden = b.addTest(.{ .root_module = test_mod });
     const reader_tests = b.addTest(.{ .root_module = fixture_mod });
 
+    // libm differential tests: millions of samples under `test`, a billion
+    // under `libm-soak`. Same file, two entry points.
+    const libm_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/libm_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    libm_test_mod.addImport("libm", libm_mod);
+    const libm_tests = b.addTest(.{ .root_module = libm_test_mod });
+    const libm_soak = b.addExecutable(.{ .name = "libm-soak", .root_module = libm_test_mod });
+    b.step("libm-soak", "Compare in-repo exp/log with compiler_rt over 1e9 samples").dependOn(&b.addRunArtifact(libm_soak).step);
+
     const test_step = b.step("test", "Replay the golden fixture and compare bit-for-bit");
     test_step.dependOn(&b.addRunArtifact(golden).step);
     test_step.dependOn(&b.addRunArtifact(reader_tests).step);
+    test_step.dependOn(&b.addRunArtifact(libm_tests).step);
 
     // -- cdf-delta: price the cost of "just use a better CDF" ----------------
     const cdf_mod = b.createModule(.{

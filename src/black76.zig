@@ -40,6 +40,19 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const libm = @import("libm");
+
+/// Scalar exp/log from src/libm.zig, so the kernel's bits depend on this
+/// repository and not on whichever compiler_rt or libc happens to be linked.
+const L1 = libm.Lanes(1);
+
+inline fn exp(x: f64) f64 {
+    return L1.exp(L1.splat(x))[0];
+}
+
+inline fn log(x: f64) f64 {
+    return L1.log(L1.splat(x))[0];
+}
 
 comptime {
     // The golden vectors are a contract on bits. `.strict` is already the
@@ -135,6 +148,22 @@ pub const sigma_sqrt_t_min: f64 = 1e-10;
 
 // -- Standard normal distribution ---------------------------------------------
 
+/// N(x), N(-x) and n(x) from ONE exponential. The kernel needs all three for
+/// d1 (both tails for the put, the density for the Greeks), and asking for them
+/// together states the sharing in the source instead of hoping the optimiser
+/// notices that exp(-x^2/2) is the same number every time. It is: measured, a
+/// kernel that calls the three functions separately runs ~30% slower once the
+/// exp is inlined, because common-subexpression elimination stops seeing
+/// through the branches.
+pub const Phi = struct {
+    /// N(x)
+    pos: f64,
+    /// N(-x)
+    neg: f64,
+    /// n(x)
+    pdf: f64,
+};
+
 /// Abramowitz & Stegun 26.2.17 -- rational polynomial approximation.
 /// Maximum absolute error < 7.5e-8.
 ///
@@ -145,7 +174,7 @@ pub const sigma_sqrt_t_min: f64 = 1e-10;
 /// N(-x) is computed literally as `1 - N(|x|)`, so the reflection identity is
 /// exact by construction and not merely approximate. (At x == +/-0 both
 /// branches see `x >= 0` and return the positive form.)
-pub fn normalCDF(x: f64) f64 {
+pub fn phi(x: f64) Phi {
     const b1: f64 = 0.319381530;
     const b2: f64 = -0.356563782;
     const b3: f64 = 1.781477937;
@@ -156,13 +185,23 @@ pub fn normalCDF(x: f64) f64 {
     const k = 1.0 / (1.0 + p * ax);
     const pdf = normalPDF(ax);
     const n_pos = 1.0 - pdf * (((((b5 * k + b4) * k + b3) * k + b2) * k + b1) * k);
-    return if (x >= 0.0) n_pos else 1.0 - n_pos;
+    return .{
+        .pos = if (x >= 0.0) n_pos else 1.0 - n_pos,
+        .neg = if (-x >= 0.0) n_pos else 1.0 - n_pos,
+        .pdf = pdf,
+    };
 }
 
-/// Standard normal PDF: n(x) = (1/sqrt(2*pi)) * exp(-x^2/2).
+/// Standard normal CDF, N(x). See `phi`.
+pub fn normalCDF(x: f64) f64 {
+    return phi(x).pos;
+}
+
+/// Standard normal PDF: n(x) = (1/sqrt(2*pi)) * exp(-x^2/2). Sign-symmetric in
+/// x to the bit, since x*x is.
 pub fn normalPDF(x: f64) f64 {
     const inv_sqrt_2pi: f64 = 0.3989422804014327; // 1 / sqrt(2*pi)
-    return inv_sqrt_2pi * @exp(-0.5 * x * x);
+    return inv_sqrt_2pi * exp(-0.5 * x * x);
 }
 
 // -- Black-76 core ------------------------------------------------------------
@@ -218,30 +257,29 @@ inline fn priceOne(in: Input) Greeks {
     assert(!(in.sigma <= 0.0));
     assert(!(sigma_sqrt_t < sigma_sqrt_t_min));
 
-    // r = 0, so e^{-rT} = 1.0.
-    const disc: f64 = 1.0;
-
-    const d1 = (@log(in.forward / in.strike) + 0.5 * in.sigma * in.sigma * in.ttm) / sigma_sqrt_t;
+    // r = 0, so the discount factor e^{-rT} is exactly 1 and is not written.
+    const d1 = (log(in.forward / in.strike) + 0.5 * in.sigma * in.sigma * in.ttm) / sigma_sqrt_t;
     const d2 = d1 - sigma_sqrt_t;
 
-    const nd1 = normalCDF(d1);
-    const nd2 = normalCDF(d2);
-    const pdf_d1 = normalPDF(d1);
+    // Two exponentials per option, and that is all: N(d1), N(-d1) and n(d1)
+    // come from the first, N(d2) and N(-d2) from the second.
+    const p1 = phi(d1);
+    const p2 = phi(d2);
 
     var out: Greeks = undefined;
     switch (in.kind) {
         .call => {
-            out.price = disc * (in.forward * nd1 - in.strike * nd2);
-            out.delta = disc * nd1;
+            out.price = in.forward * p1.pos - in.strike * p2.pos;
+            out.delta = p1.pos;
         },
         .put => {
-            out.price = disc * (in.strike * normalCDF(-d2) - in.forward * normalCDF(-d1));
-            out.delta = -disc * normalCDF(-d1);
+            out.price = in.strike * p2.neg - in.forward * p1.neg;
+            out.delta = -p1.neg;
         },
     }
-    out.gamma = disc * pdf_d1 / (in.forward * sigma_sqrt_t);
-    out.theta = -(in.forward * in.sigma * disc * pdf_d1) / (2.0 * sqrt_t);
-    out.vega = in.forward * disc * pdf_d1 * sqrt_t;
+    out.gamma = p1.pdf / (in.forward * sigma_sqrt_t);
+    out.theta = -(in.forward * in.sigma * p1.pdf) / (2.0 * sqrt_t);
+    out.vega = in.forward * p1.pdf * sqrt_t;
 
     // Postconditions, NaN-transparent. Gamma and vega are densities and cannot
     // be negative; theta is minus a density; |delta| is a probability.
