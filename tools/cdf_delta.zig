@@ -1,18 +1,18 @@
-// cdf_delta.zig -- measure what swapping the normal CDF actually costs.
-//
-//   zig build cdf-delta
-//
-// The kernel uses Abramowitz & Stegun 26.2.17, a rational polynomial with
-// |err| < 7.5e-8. Sooner or later someone proposes replacing it with erf(),
-// which is more accurate, and the proposal sounds like a cleanup.
-//
-// This tool answers the only question that matters: how far does the PRICE
-// move. It replays every input in the golden fixture through both CDFs and
-// reports the largest disagreement, absolute and relative.
-//
-// The answer is not "within tolerance" or "outside tolerance". There is no
-// tolerance. The answer is a number, and someone with P&L responsibility
-// decides whether they want it.
+//! cdf_delta.zig -- measure what swapping the normal CDF actually costs.
+//!
+//!   zig build cdf-delta
+//!
+//! The kernel uses Abramowitz & Stegun 26.2.17, a rational polynomial with
+//! |err| < 7.5e-8. Sooner or later someone proposes replacing it with erf(),
+//! which is more accurate, and the proposal sounds like a cleanup.
+//!
+//! This tool answers the only question that matters: how far does the PRICE
+//! move. It replays every input in the golden fixture through both CDFs and
+//! reports the largest disagreement, absolute and relative.
+//!
+//! The answer is not "within tolerance" or "outside tolerance". There is no
+//! tolerance. The answer is a number, and someone with P&L responsibility
+//! decides whether they want it.
 
 const std = @import("std");
 const b76 = @import("black76");
@@ -56,64 +56,66 @@ fn hartCDF(x: f64) f64 {
     return if (x > 0.0) 1.0 - c else c;
 }
 
-fn priceWith(comptime cdf: fn (f64) f64, forward: f64, strike: f64, sigma: f64, ttm: f64, is_call: bool) ?f64 {
+fn priceWith(comptime cdf: fn (f64) f64, in: b76.Input) ?f64 {
     // Degenerate branches do not touch the CDF at all, so they cannot differ.
     // Skip them rather than pretend to measure them.
-    if (forward <= 0.0 or strike <= 0.0) return null;
-    if (ttm <= 0.0) return null;
-    if (sigma <= 0.0) return null;
-    const sqrt_t = @sqrt(ttm);
-    const sigma_sqrt_t = sigma * sqrt_t;
-    if (sigma_sqrt_t < 1e-10) return null;
+    if (in.forward <= 0.0 or in.strike <= 0.0) return null;
+    if (in.ttm <= 0.0) return null;
+    if (in.sigma <= 0.0) return null;
+    const sqrt_t = @sqrt(in.ttm);
+    const sigma_sqrt_t = in.sigma * sqrt_t;
+    if (sigma_sqrt_t < b76.sigma_sqrt_t_min) return null;
 
-    const d1 = (@log(forward / strike) + 0.5 * sigma * sigma * ttm) / sigma_sqrt_t;
+    const d1 = (@log(in.forward / in.strike) + 0.5 * in.sigma * in.sigma * in.ttm) / sigma_sqrt_t;
     const d2 = d1 - sigma_sqrt_t;
-    if (is_call) return forward * cdf(d1) - strike * cdf(d2);
-    return strike * cdf(-d2) - forward * cdf(-d1);
+    return switch (in.kind) {
+        .call => in.forward * cdf(d1) - in.strike * cdf(d2),
+        .put => in.strike * cdf(-d2) - in.forward * cdf(-d1),
+    };
 }
+
+const Worst = struct {
+    gap: f64 = 0.0,
+    price: f64 = 0.0,
+    at: ?fx.Vector = null,
+
+    fn update(worst: *Worst, gap: f64, price: f64, v: fx.Vector) void {
+        if (gap > worst.gap) {
+            worst.gap = gap;
+            worst.price = price;
+            worst.at = v;
+        }
+    }
+};
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
-    const gpa = init.arena.allocator();
-    const vs = try fx.parseAll(gpa, fixture_text);
+    const gpa = init.gpa;
 
-    var worst_abs: f64 = 0.0;
-    var worst_abs_at: ?fx.Vector = null;
-    var worst_rel: f64 = 0.0;
-    var worst_rel_at: ?fx.Vector = null;
-    var worst_rel_price: f64 = 0.0;
+    const vs = try fx.parseAlloc(gpa, fixture_text);
+    defer gpa.free(vs);
+
+    var abs: Worst = .{};
+    var rel: Worst = .{};
     // Same measure, restricted to options actually worth something (>= 0.1% of
     // forward). A ratio taken on a near-worthless option is arithmetically true
     // and economically meaningless; both are reported so neither can be quoted
     // alone.
-    var worst_rel_mat: f64 = 0.0;
-    var worst_rel_mat_at: ?fx.Vector = null;
-    var worst_rel_mat_price: f64 = 0.0;
+    var rel_priced: Worst = .{};
     var compared: usize = 0;
 
-    for (vs.items) |v| {
-        const a = priceWith(b76.normalCDF, v.f, v.k, v.s, v.t, v.c) orelse continue;
-        const b = priceWith(hartCDF, v.f, v.k, v.s, v.t, v.c) orelse continue;
+    for (vs) |v| {
+        const a = priceWith(b76.normalCDF, v.input()) orelse continue;
+        const b = priceWith(hartCDF, v.input()) orelse continue;
         compared += 1;
-        const abs = @abs(a - b);
-        if (abs > worst_abs) {
-            worst_abs = abs;
-            worst_abs_at = v;
-        }
+        const gap = @abs(a - b);
+        abs.update(gap, a, v);
         // Relative only where there is a price to be relative to; a 1e-9
         // absolute move on a 1e-30 price is a meaningless ratio.
         if (@abs(a) > 1e-6) {
-            const rel = abs / @abs(a);
-            if (rel > worst_rel) {
-                worst_rel = rel;
-                worst_rel_at = v;
-                worst_rel_price = a;
-            }
-            if (@abs(a) >= 0.001 * v.f and rel > worst_rel_mat) {
-                worst_rel_mat = rel;
-                worst_rel_mat_at = v;
-                worst_rel_mat_price = a;
-            }
+            const ratio = gap / @abs(a);
+            rel.update(ratio, a, v);
+            if (@abs(a) >= 0.001 * v.f) rel_priced.update(ratio, a, v);
         }
     }
 
@@ -125,28 +127,28 @@ pub fn main(init: std.process.Init) !void {
         \\  vectors compared          : {d} (degenerate branches skipped -- they never call the CDF)
         \\
     , .{compared});
-    if (worst_abs_at) |v| {
+    if (abs.at) |v| {
         try w.print(
             \\  worst ABSOLUTE price gap  : {d:.6}
             \\      at F={d} K={d} sigma={d} T={d}y {s}
             \\
-        , .{ worst_abs, v.f, v.k, v.s, v.t, if (v.c) "call" else "put" });
+        , .{ abs.gap, v.f, v.k, v.s, v.t, @tagName(v.kind) });
     }
-    if (worst_rel_at) |v| {
+    if (rel.at) |v| {
         try w.print(
             \\  worst RELATIVE gap        : {d:.4} bps on a price of {d:.6}
             \\      at F={d} K={d} sigma={d} T={d}y {s}
             \\      -- near-worthless option; the ratio is true and economically empty
             \\
-        , .{ worst_rel * 10000.0, worst_rel_price, v.f, v.k, v.s, v.t, if (v.c) "call" else "put" });
+        , .{ rel.gap * 10000.0, rel.price, v.f, v.k, v.s, v.t, @tagName(v.kind) });
     }
-    if (worst_rel_mat_at) |v| {
+    if (rel_priced.at) |v| {
         try w.print(
             \\  worst RELATIVE gap, priced: {d:.4} bps on a price of {d:.6}
             \\      at F={d} K={d} sigma={d} T={d}y {s}
             \\      -- restricted to options worth >= 0.1% of forward
             \\
-        , .{ worst_rel_mat * 10000.0, worst_rel_mat_price, v.f, v.k, v.s, v.t, if (v.c) "call" else "put" });
+        , .{ rel_priced.gap * 10000.0, rel_priced.price, v.f, v.k, v.s, v.t, @tagName(v.kind) });
     }
     try w.print(
         \\
