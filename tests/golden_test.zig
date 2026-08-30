@@ -18,8 +18,51 @@ const b76 = @import("black76");
 const builtin = @import("builtin");
 const fx = @import("fixture");
 const fixture = @embedFile("golden_fixture");
+const kernel_source = @embedFile("black76_source");
 
 const bits = fx.bits;
+
+const sign_bit: u64 = 0x8000000000000000;
+
+/// Compare one output from two LIVE paths in the same build: numbers by bits,
+/// NaN by payload with the SIGN BIT EXCLUDED.
+///
+/// This is deliberately stronger than the `isNan`-for-`isNan` matching it
+/// replaced, and deliberately weaker than a total bit compare. Both halves were
+/// measured on this tree at `4946caf` before the rule was written, because the
+/// obvious rule -- compare all 64 bits -- is WRONG here and passes on some
+/// configurations by luck:
+///
+///     scalar vs batch, NaN outputs, x86_64          sign differs   payload differs
+///       Debug        lanes 4 (raptorlake)                yes             no
+///       ReleaseFast  lanes 4 (raptorlake)                NO              no
+///       Debug        lanes 2 (baseline)                  yes             no
+///       ReleaseFast  lanes 2 (baseline)          yes (gamma/theta/vega)  no
+///
+/// Over 477 NaN output pairs from the random test's own input mix: 31 sign
+/// disagreements in Debug/4-lane, 0 payload disagreements anywhere, 0 numeric
+/// disagreements anywhere. The scalar path's OWN NaN sign also moves between
+/// Debug and ReleaseFast (F=NaN call delta is 0xFFF8.. in Debug and 0x7FF8.. in
+/// ReleaseFast), so this is not a batch defect: IEEE-754 does not specify the
+/// sign of a NaN result, and neither LLVM nor the hardware is obliged to be
+/// consistent about it across optimisation levels or vector widths.
+///
+/// So the sign bit is excluded BY MEASUREMENT, not by assumption, and
+/// everything else about a NaN -- quiet bit and full payload -- is now enforced
+/// where it previously was not compared at all. `nan divergence between the two
+/// paths is sign-only` below pins the exclusion itself, so if a payload ever
+/// starts moving, this rule does not quietly absorb it.
+///
+/// NOTE the scope: this compares two paths in ONE build on ONE machine. It says
+/// nothing about NaN bits across architectures, which the fixture deliberately
+/// does not test (it carries no NaN vectors) and the README does not promise.
+fn samePath(a: f64, b: f64) bool {
+    if (std.math.isNan(a) or std.math.isNan(b)) {
+        if (!(std.math.isNan(a) and std.math.isNan(b))) return false;
+        return (bits(a) & ~sign_bit) == (bits(b) & ~sign_bit);
+    }
+    return bits(a) == bits(b);
+}
 
 /// Printed only when something has already gone wrong. A passing run says
 /// nothing: a green test that chatters trains you to skip reading it.
@@ -57,7 +100,7 @@ fn greeksVia(comptime path: enum { zig, c_abi }, in: b76.Input) b76.Greeks {
 
 test "fixture header is present and structurally sound" {
     const header = try fx.parseHeader(fixture);
-    try std.testing.expectEqualStrings("black76-golden/2", header.schema);
+    try std.testing.expectEqualStrings("black76-golden/3", header.schema);
 
     var counted: usize = 0;
     var it = std.mem.tokenizeScalar(u8, fixture, '\n');
@@ -65,6 +108,51 @@ test "fixture header is present and structurally sound" {
         if (!fx.isHeader(line)) counted += 1;
     }
     try std.testing.expectEqual(header.vector_count, counted);
+}
+
+test "the fixture header's source fingerprint is still true" {
+    // THE GAP THIS CLOSES. The header records `source_sha256` and
+    // `source_bytes` for `src/black76.zig`, which is the file's claim about
+    // WHICH kernel produced these numbers -- and nothing verified it. It
+    // cannot be `zig build reproduce`'s job: that tool diffs VECTOR lines and
+    // deliberately ignores headers, because headers legitimately differ per
+    // capture (zig version, target, cpu, optimize). So a fixture could carry a
+    // fingerprint of a kernel that no longer exists and every gate in the
+    // repository would stay green. That is not hypothetical -- it was found in
+    // a working tree whose committed fixture fingerprinted a source 456 bytes
+    // older than the kernel beside it, the difference being non-semantic, so
+    // the vector lines still matched and nothing said a word.
+    //
+    // With this test, provenance stops being a convention and becomes a gate:
+    // any edit to `src/black76.zig` turns the suite red until
+    // `zig build generate` re-runs. That is the right direction of friction for
+    // a repository whose entire subject is that the numbers came from a
+    // specific binary -- and note it fires on COMMENT-ONLY edits too, which is
+    // correct rather than annoying: the header claims a sha of the file, not of
+    // its semantics, and a fingerprint with exceptions is not a fingerprint.
+    const header_line = fixture[0 .. std.mem.indexOfScalar(u8, fixture, '\n') orelse fixture.len];
+
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(kernel_source, &digest, .{});
+    var expected: [64]u8 = undefined;
+    _ = try std.fmt.bufPrint(&expected, "{x}", .{&digest});
+
+    const stored_sha = try fx.strField(header_line, "source_sha256");
+    if (!std.mem.eql(u8, stored_sha, &expected)) {
+        std.debug.print(
+            \\
+            \\  The fixture was captured from a DIFFERENT src/black76.zig.
+            \\    header source_sha256 : {s}
+            \\    live   src/black76.zig: {s}
+            \\  Re-run `zig build generate` (and read the diff before committing it).
+            \\
+        , .{ stored_sha, expected });
+        return error.FixtureSourceFingerprintStale;
+    }
+
+    // The byte count is redundant with the sha and cheap, and it is the field a
+    // human reads first when the sha disagrees.
+    try std.testing.expectEqual(@as(u64, kernel_source.len), try fx.intField(header_line, "source_bytes"));
 }
 
 test "every golden vector reproduces bit-for-bit" {
@@ -175,8 +263,12 @@ test "batch is bit-identical to the single-vector path" {
 test "batch is bit-identical to the single path on random inputs, degenerate and special values included" {
     // The fixture has no NaN and no +inf; this does. Batch runs the SIMD main
     // path on every lane and hands guard-tripping lanes to the scalar kernel,
-    // so the two paths must agree everywhere: bit-for-bit where the answer is
-    // a number, isNan-for-isNan where it is not.
+    // so the two paths must agree everywhere: bit-for-bit where the answer is a
+    // number, and payload-for-payload where it is a NaN. The comparison used to
+    // be `isNan` against `isNan`, which asserted only that both paths had
+    // FAILED -- two NaNs with different payloads passed it, and so would a
+    // signalling NaN against a quiet one. See `samePath` for what replaced it
+    // and for the measurements that fixed where the line sits.
     const gpa = std.testing.allocator;
     const n: usize = 4096;
     const fs = try gpa.alloc(f64, n);
@@ -235,13 +327,197 @@ test "batch is bit-identical to the single path on random inputs, degenerate and
             .{ single.price, outputs.prices[i] },
         };
         for (pairs) |pair| {
-            if (std.math.isNan(pair[0]) or std.math.isNan(pair[1])) {
-                try std.testing.expect(std.math.isNan(pair[0]) and std.math.isNan(pair[1]));
-            } else {
-                try std.testing.expectEqual(bits(pair[0]), bits(pair[1]));
+            try std.testing.expect(samePath(pair[0], pair[1]));
+        }
+    }
+}
+
+test "batch and single agree at every batch size, remainder lanes included" {
+    // THE GAP THIS CLOSES. The random test above runs n = 4096, which is a
+    // multiple of 1, 2, 4 and 8 -- of every value `batch_lanes` can take. So
+    // `greeksBatch`'s scalar tail (`while (i < n) : (i += 1)`) never executed
+    // under it, on any target: the main loop was exercised 4,096 times over and
+    // the tail exactly zero times. A remainder handled wrongly -- a lane
+    // dropped, one written twice, an off-by-one on the final store -- passed
+    // the entire suite.
+    //
+    // The sizes below are chosen so that n % batch_lanes != 0 for EVERY lane
+    // width the kernel can compile to, not merely the host's. 0..17 covers
+    // 2*widest+1 exhaustively; the primes cannot be a multiple of any lane
+    // width above 1; the large awkward sizes run a long main loop followed by a
+    // near-full-width tail. n = 0 is included because an empty batch is a call
+    // a caller can make.
+    const gpa = std.testing.allocator;
+    const sizes = [_]usize{
+        0,   1,   2,   3,   4,   5,    6,    7,  8,  9,  10, 11, 12, 13, 14, 15, 16, 17,
+        19,  23,  29,  31,  37,  41,   43,   47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97,
+        101, 103, 127, 251, 509, 1021, 4093,
+    };
+
+    var prng = std.Random.DefaultPrng.init(0x7a11);
+    const r = prng.random();
+    // The same special-value mix the random test uses, so the tail meets
+    // guard-tripping lanes and not only ordinary ones -- agreeing with the
+    // scalar kernel on the degenerate branches is most of the tail's job.
+    const specials = [_]f64{ 0.0, -0.0, -1.0, 1e-30, 1e-11, 1e-10, std.math.inf(f64), -std.math.inf(f64), std.math.nan(f64), 500.0 };
+
+    for (sizes) |n| {
+        const fs = try gpa.alloc(f64, n);
+        defer gpa.free(fs);
+        const ks = try gpa.alloc(f64, n);
+        defer gpa.free(ks);
+        const ss = try gpa.alloc(f64, n);
+        defer gpa.free(ss);
+        const ts = try gpa.alloc(f64, n);
+        defer gpa.free(ts);
+        const kinds = try gpa.alloc(b76.Kind, n);
+        defer gpa.free(kinds);
+        const out = try gpa.alloc(f64, 5 * n);
+        defer gpa.free(out);
+
+        for (0..n) |i| {
+            const magnitudes = [_]f64{ 0.5, 500.0, 500000.0 };
+            fs[i] = magnitudes[r.uintLessThan(usize, 3)];
+            ks[i] = fs[i] / (0.05 + 20.0 * r.float(f64));
+            ss[i] = 0.01 + 3.0 * r.float(f64);
+            ts[i] = 1e-6 + 2.0 * r.float(f64);
+            kinds[i] = if (r.boolean()) .call else .put;
+            if (r.uintLessThan(u8, 8) == 0) {
+                const value = specials[r.uintLessThan(usize, specials.len)];
+                switch (r.uintLessThan(usize, 4)) {
+                    0 => fs[i] = value,
+                    1 => ks[i] = value,
+                    2 => ss[i] = value,
+                    else => ts[i] = value,
+                }
+            }
+        }
+
+        const outputs: b76.BatchOutputs = .{
+            .deltas = out[0 * n ..][0..n],
+            .gammas = out[1 * n ..][0..n],
+            .thetas = out[2 * n ..][0..n],
+            .vegas = out[3 * n ..][0..n],
+            .prices = out[4 * n ..][0..n],
+        };
+        b76.greeksBatch(.{ .forwards = fs, .strikes = ks, .sigmas = ss, .ttms = ts, .kinds = kinds }, outputs);
+
+        for (0..n) |i| {
+            const single = b76.greeks(.{ .forward = fs[i], .strike = ks[i], .sigma = ss[i], .ttm = ts[i], .kind = kinds[i] });
+            const pairs = [_][2]f64{
+                .{ single.delta, outputs.deltas[i] },
+                .{ single.gamma, outputs.gammas[i] },
+                .{ single.theta, outputs.thetas[i] },
+                .{ single.vega, outputs.vegas[i] },
+                .{ single.price, outputs.prices[i] },
+            };
+            for (pairs) |pair| {
+                if (samePath(pair[0], pair[1])) continue;
+                std.debug.print(
+                    "\n  batch/single disagree at n={d} index {d} (lanes={d}, tail starts at {d})\n    single 0x{X:0>16}  batch 0x{X:0>16}\n",
+                    .{ n, i, b76.batch_lanes, n - (n % b76.batch_lanes), bits(pair[0]), bits(pair[1]) },
+                );
+                return error.BatchSingleMismatch;
             }
         }
     }
+}
+
+test "the swept batch sizes really do reach the scalar tail on this target" {
+    // The sweep above is only a REMAINDER test if some size in it leaves one.
+    // That depends on `batch_lanes`, a comptime property of the target -- so on
+    // a scalar target (batch_lanes == 1) every size divides evenly and the
+    // sweep silently degrades into another main-path test. This says which of
+    // the two just ran.
+    if (b76.batch_lanes == 1) return; // no tail exists to reach
+    try std.testing.expect(17 % b76.batch_lanes != 0);
+    try std.testing.expect(4093 % b76.batch_lanes != 0);
+    // And the widest supported width still leaves a remainder on the primes,
+    // so this file stays a tail test if AVX-512 (8 lanes) is what compiles.
+    try std.testing.expect(4093 % 8 != 0);
+}
+
+test "NaN divergence between the two live paths is sign-only, never payload" {
+    // The exclusion in `samePath` is a licence, so it gets its own guard. If a
+    // future change makes the batch path produce a DIFFERENT NaN payload -- a
+    // real defect, and the thing `isNan`-matching hid for two releases -- this
+    // fails even though `samePath` would forgive the sign.
+    //
+    // Every case here puts one NaN in one input slot, which is how a NaN
+    // reaches the kernel in practice: an unpriced mark, a missing vol.
+    const nan = std.math.nan(f64);
+    const cases = [_]b76.Input{
+        .{ .forward = nan, .strike = 500.0, .sigma = 0.5, .ttm = 1.0, .kind = .call },
+        .{ .forward = nan, .strike = 500.0, .sigma = 0.5, .ttm = 1.0, .kind = .put },
+        .{ .forward = 500.0, .strike = nan, .sigma = 0.5, .ttm = 1.0, .kind = .call },
+        .{ .forward = 500.0, .strike = nan, .sigma = 0.5, .ttm = 1.0, .kind = .put },
+        .{ .forward = 500.0, .strike = 500.0, .sigma = nan, .ttm = 1.0, .kind = .call },
+        .{ .forward = 500.0, .strike = 500.0, .sigma = nan, .ttm = 1.0, .kind = .put },
+        .{ .forward = 500.0, .strike = 500.0, .sigma = 0.5, .ttm = nan, .kind = .call },
+        .{ .forward = 500.0, .strike = 500.0, .sigma = 0.5, .ttm = nan, .kind = .put },
+    };
+
+    const gpa = std.testing.allocator;
+    // Two full vectors' worth, so the case is evaluated on the SIMD main path
+    // whatever `batch_lanes` is on this target.
+    const n = b76.batch_lanes * 2;
+    const fs = try gpa.alloc(f64, n);
+    defer gpa.free(fs);
+    const ks = try gpa.alloc(f64, n);
+    defer gpa.free(ks);
+    const ss = try gpa.alloc(f64, n);
+    defer gpa.free(ss);
+    const ts = try gpa.alloc(f64, n);
+    defer gpa.free(ts);
+    const kinds = try gpa.alloc(b76.Kind, n);
+    defer gpa.free(kinds);
+    const out = try gpa.alloc(f64, 5 * n);
+    defer gpa.free(out);
+
+    var nan_pairs: usize = 0;
+    for (cases) |c| {
+        for (0..n) |i| {
+            fs[i] = c.forward;
+            ks[i] = c.strike;
+            ss[i] = c.sigma;
+            ts[i] = c.ttm;
+            kinds[i] = c.kind;
+        }
+        const outputs: b76.BatchOutputs = .{
+            .deltas = out[0 * n ..][0..n],
+            .gammas = out[1 * n ..][0..n],
+            .thetas = out[2 * n ..][0..n],
+            .vegas = out[3 * n ..][0..n],
+            .prices = out[4 * n ..][0..n],
+        };
+        b76.greeksBatch(.{ .forwards = fs, .strikes = ks, .sigmas = ss, .ttms = ts, .kinds = kinds }, outputs);
+
+        const single = b76.greeks(c);
+        const pairs = [_][2]f64{
+            .{ single.delta, outputs.deltas[0] },
+            .{ single.gamma, outputs.gammas[0] },
+            .{ single.theta, outputs.thetas[0] },
+            .{ single.vega, outputs.vegas[0] },
+            .{ single.price, outputs.prices[0] },
+        };
+        for (pairs) |pair| {
+            // A NaN in must give NaN out on both paths -- that much is already
+            // pinned elsewhere; here it is the precondition for the real check.
+            try std.testing.expect(std.math.isNan(pair[0]) and std.math.isNan(pair[1]));
+            nan_pairs += 1;
+            const differing = bits(pair[0]) ^ bits(pair[1]);
+            if (differing != 0 and differing != sign_bit) {
+                std.debug.print(
+                    "\n  NaN payload divergence (not merely sign): single 0x{X:0>16} batch 0x{X:0>16}\n",
+                    .{ bits(pair[0]), bits(pair[1]) },
+                );
+                return error.NaNPayloadDivergence;
+            }
+        }
+    }
+    // The cases really did produce NaN pairs, so a future refactor that made
+    // them return zeros could not turn this into a vacuous pass.
+    try std.testing.expectEqual(@as(usize, 5 * cases.len), nan_pairs);
 }
 
 test "the three degenerate branches disagree at F == K, and that is on purpose" {

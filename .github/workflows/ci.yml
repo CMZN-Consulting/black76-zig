@@ -16,12 +16,17 @@ jobs:
   check:
     name: "${{ matrix.arch }}"
     runs-on: ${{ matrix.runner }}
-    # The aarch64 job is the open question this repo is honest about: the golden
-    # vectors were captured on x86_64, and whether a different architecture
-    # reproduces them bit-for-bit has never been tested. It runs, it reports,
-    # and it does not gate -- a red mark there would be a FINDING about the
-    # kernel, not a broken build, and it should be read as one.
-    continue-on-error: ${{ matrix.informational }}
+    # BOTH ARCHITECTURES GATE. aarch64 used to be informational -- the golden
+    # vectors were captured on x86_64 and whether another architecture
+    # reproduced them bit-for-bit had never been tested, so a red mark there
+    # would have been a finding rather than a broken build. It has been tested
+    # now: aarch64 replays 3,516/3,516 on real silicon. Cross-architecture
+    # bit-identity is therefore a PROMISE this repository makes, and a promise
+    # that does not gate is a note.
+    #
+    # `continue-on-error` is gone rather than set to false, and the matrix's
+    # `informational` key with it: a flag whose only value is the default is a
+    # place for the old behaviour to come back.
     strategy:
       fail-fast: false
       matrix:
@@ -29,11 +34,9 @@ jobs:
           - arch: "x86_64"
             runner: "ubuntu-latest"
             zig_target: "x86_64"
-            informational: false
-          - arch: "aarch64 (informational, the open question)"
+          - arch: "aarch64"
             runner: "ubuntu-24.04-arm"
             zig_target: "aarch64"
-            informational: true
 
     steps:
       - uses: actions/checkout@v4
@@ -56,23 +59,47 @@ jobs:
       - name: Formatting
         run: zig fmt --check .
 
-      # Debug runs the kernel's assertions; ReleaseFast is what ships. The
-      # fixture must replay bit-for-bit under both, which is also the claim
-      # that optimisation level is not part of the contract.
+      # THE FULL MODE x LANE-WIDTH MATRIX, because each cell answers a
+      # different question and the three modes are not interchangeable:
+      #
+      #   Debug        unoptimised, assertions ON  -- the kernel's own
+      #                postconditions actually run
+      #   ReleaseSafe  OPTIMISED,   assertions ON  -- the only cell where the
+      #                optimiser and the assertions meet. Neither of the other
+      #                two covers it, and it was not run here at all until now.
+      #   ReleaseFast  optimised,   assertions off -- what ships
+      #
+      # crossed with lane width, because the batch path is SIMD and its lane
+      # count follows the CPU: `-Dcpu=baseline` is the 2-lane path and its
+      # scalar tail, the runner's own CPU is the widest width it has. Replaying
+      # bit-for-bit in all six is the claim that neither optimisation level nor
+      # vector width is part of the contract.
       - name: Replay the golden vectors (Debug, assertions on)
         run: zig build test
+
+      - name: Replay the golden vectors (Debug, narrowest lane width)
+        run: zig build test -Dcpu=baseline
+
+      - name: Replay the golden vectors (ReleaseSafe, optimised + assertions)
+        run: zig build test -Doptimize=ReleaseSafe
+
+      - name: Replay the golden vectors (ReleaseSafe, narrowest lane width)
+        run: zig build test -Doptimize=ReleaseSafe -Dcpu=baseline
 
       - name: Replay the golden vectors (ReleaseFast, as shipped)
         run: zig build test -Doptimize=ReleaseFast
 
-      # The batch path is SIMD and its lane count follows the CPU. The
-      # narrowest x86-64 build exercises the 2-lane path and its scalar tail;
-      # the runner's own CPU exercises the widest one it has.
-      - name: Replay at the narrowest lane width
+      - name: Replay at the narrowest lane width (ReleaseFast)
         run: zig build test -Doptimize=ReleaseFast -Dcpu=baseline
 
+      # Re-capture, twice. The fixture is written by the generator, which is
+      # itself built for a target -- so reproducing at the host width alone
+      # would leave a capture that depended on the width unnoticed.
       - name: Re-capture and diff against the committed fixture
         run: zig build reproduce
+
+      - name: Re-capture at the narrowest lane width
+        run: zig build reproduce -Dcpu=baseline
 
       - name: Build the library
         run: zig build -Doptimize=ReleaseFast
