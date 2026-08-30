@@ -144,10 +144,21 @@ pub fn build(b: *std.Build) void {
 
     const normal_tests = b.addTest(.{ .root_module = normal_mod });
 
+    // `src/libm.zig`'s own inline test. `normal_mod` and `fixture_mod` each got
+    // a test artifact and `libm_mod` did not, so the one test living inside the
+    // libm source could never run: poison it with `expect(false)` and the suite
+    // stayed green. A test that cannot fail is a decorative instrument, which
+    // is the class this repository's tests exist to remove. Cheap to wire --
+    // 29 scalar values against compiler_rt -- and it is the only differential
+    // that covers `Lanes(1)` through the module's own public surface rather
+    // than through `tests/libm_test.zig`'s harness.
+    const libm_unit_tests = b.addTest(.{ .root_module = libm_mod });
+
     const test_step = b.step("test", "Replay the golden fixture and compare bit-for-bit");
     test_step.dependOn(&b.addRunArtifact(golden).step);
     test_step.dependOn(&b.addRunArtifact(reader_tests).step);
     test_step.dependOn(&b.addRunArtifact(libm_tests).step);
+    test_step.dependOn(&b.addRunArtifact(libm_unit_tests).step);
     test_step.dependOn(&b.addRunArtifact(normal_tests).step);
 
     // -- cdf-delta: price the cost of "just use a better CDF" ----------------

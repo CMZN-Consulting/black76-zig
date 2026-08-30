@@ -98,7 +98,7 @@ Needs [Zig 0.16.0](https://ziglang.org/download/). Nothing else — no package r
 no C library, and since v2 not even the compiler's own `exp` and `log`.
 
 ```sh
-zig build test                            # replay all 3,516 vectors, bit-for-bit (23 tests)
+zig build test                            # replay all 3,516 vectors, bit-for-bit (24 tests)
 zig build reproduce                       # re-capture from scratch, diff against the file
 zig build cdf-delta                       # what the v1 -> v2 model change did to prices
 zig build assoc-delta                     # what the v2 -> v3' re-association moved
@@ -256,8 +256,8 @@ An honest golden-vector file has to say what it is a golden vector *of*. This on
 specific compiler, and the header line of the fixture records exactly which:
 
 ```json
-{"header":1,"schema":"black76-golden/2","zig_version":"0.16.0",
- "target":"x86_64-linux-gnu","cpu":"x86_64","optimize":"ReleaseFast", ...}
+{"header":1,"schema":"black76-golden/3","zig_version":"0.16.0",
+ "target":"x86_64-linux-gnu","cpu":"raptorlake","optimize":"ReleaseFast", ...}
 ```
 
 We measured how much of that actually matters. Regenerating across **four optimisation modes ×
