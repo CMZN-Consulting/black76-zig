@@ -296,28 +296,110 @@ inline fn intrinsic(in: Input, atm: AtTheMoney) Greeks {
     return out;
 }
 
-/// Batch over caller-owned structure-of-arrays slices.
-///
-/// This is a plain loop over `greeks` and is REQUIRED to stay bit-identical to
-/// it: the golden test compares the two live paths element by element, so any
-/// future vectorisation that changes association order fails loudly.
+/// Lanes in the SIMD batch path: the widest f64 vector the target does in one
+/// register (8 on AVX-512, 4 on AVX2, 2 on SSE2/NEON), or 1 where there is no
+/// SIMD at all. The choice affects speed only: every lane runs the scalar
+/// path's operations in the scalar path's order, so the bits do not move with
+/// the width, and the test suite checks batch against single at whatever width
+/// the build picked.
+pub const batch_lanes: comptime_int = @min(8, std.simd.suggestVectorLength(f64) orelse 1);
+
+const V = @Vector(batch_lanes, f64);
+const VB = @Vector(batch_lanes, bool);
+const LN = libm.Lanes(batch_lanes);
+const NN = normal.Lanes(batch_lanes);
+
+inline fn vsplat(x: f64) V {
+    return @splat(x);
+}
+
+/// Batch over caller-owned structure-of-arrays slices, `batch_lanes` options
+/// at a time. Bit-identical to `greeks` on every element, by construction: the
+/// main path is the scalar main path written over vectors (same operations,
+/// same order, strict float mode, no contraction), and every lane that any of
+/// the four guards would catch is handed back to the scalar kernel, whose
+/// answer overwrites the lane. The golden test compares the two live paths
+/// element by element, so a vectorisation that changed association order
+/// would fail loudly.
 pub fn greeksBatch(inputs: BatchInputs, outputs: BatchOutputs) void {
     const n = inputs.len();
     assert(outputs.len() == n);
 
-    for (0..n) |i| {
-        const out = priceOne(.{
-            .forward = inputs.forwards[i],
-            .strike = inputs.strikes[i],
-            .sigma = inputs.sigmas[i],
-            .ttm = inputs.ttms[i],
-            .kind = inputs.kinds[i],
-        });
-        outputs.deltas[i] = out.delta;
-        outputs.gammas[i] = out.gamma;
-        outputs.thetas[i] = out.theta;
-        outputs.vegas[i] = out.vega;
-        outputs.prices[i] = out.price;
+    var i: usize = 0;
+    if (batch_lanes > 1) {
+        while (i + batch_lanes <= n) : (i += batch_lanes) {
+            priceLanes(inputs, outputs, i);
+        }
+    }
+    while (i < n) : (i += 1) {
+        storeOne(outputs, i, priceOne(inputAt(inputs, i)));
+    }
+}
+
+inline fn inputAt(inputs: BatchInputs, i: usize) Input {
+    return .{
+        .forward = inputs.forwards[i],
+        .strike = inputs.strikes[i],
+        .sigma = inputs.sigmas[i],
+        .ttm = inputs.ttms[i],
+        .kind = inputs.kinds[i],
+    };
+}
+
+inline fn storeOne(outputs: BatchOutputs, i: usize, out: Greeks) void {
+    outputs.deltas[i] = out.delta;
+    outputs.gammas[i] = out.gamma;
+    outputs.thetas[i] = out.theta;
+    outputs.vegas[i] = out.vega;
+    outputs.prices[i] = out.price;
+}
+
+/// One vector's worth of options, starting at `i`.
+inline fn priceLanes(inputs: BatchInputs, outputs: BatchOutputs, i: usize) void {
+    const forward: V = inputs.forwards[i..][0..batch_lanes].*;
+    const strike: V = inputs.strikes[i..][0..batch_lanes].*;
+    const sigma: V = inputs.sigmas[i..][0..batch_lanes].*;
+    const ttm: V = inputs.ttms[i..][0..batch_lanes].*;
+    const kind_bytes: @Vector(batch_lanes, u8) = @as([batch_lanes]u8, @bitCast(inputs.kinds[i..][0..batch_lanes].*));
+    const is_call = kind_bytes == @as(@Vector(batch_lanes, u8), @splat(@intFromEnum(Kind.call)));
+
+    // The four guards, as lane masks. Any lane that trips one is recomputed
+    // below by the scalar kernel, which is the authority on what they return
+    // and in which order they apply. The main path still runs on those lanes
+    // (garbage in, garbage out, nothing traps); their results are discarded.
+    const sqrt_t = @sqrt(ttm);
+    const sigma_sqrt_t = sigma * sqrt_t;
+    const invalid = @select(bool, forward <= vsplat(0.0), forward <= vsplat(0.0), strike <= vsplat(0.0));
+    const expired = ttm <= vsplat(0.0);
+    const zero_vol = sigma <= vsplat(0.0);
+    const asymptotic = sigma_sqrt_t < vsplat(sigma_sqrt_t_min);
+    const degenerate = @select(bool, invalid, invalid, @select(bool, expired, expired, @select(bool, zero_vol, zero_vol, asymptotic)));
+
+    // Main path: the scalar formulas, verbatim, over lanes.
+    const d1 = (LN.log(forward / strike) + vsplat(0.5) * sigma * sigma * ttm) / sigma_sqrt_t;
+    const d2 = d1 - sigma_sqrt_t;
+    const p1 = NN.phi(d1);
+    const p2 = NN.phi(d2);
+
+    const price_call = forward * p1.pos - strike * p2.pos;
+    const price_put = strike * p2.neg - forward * p1.neg;
+    const delta = @select(f64, is_call, p1.pos, -p1.neg);
+    const price = @select(f64, is_call, price_call, price_put);
+    const gamma = p1.pdf / (forward * sigma_sqrt_t);
+    const theta = -(forward * sigma * p1.pdf) / (vsplat(2.0) * sqrt_t);
+    const vega = forward * p1.pdf * sqrt_t;
+
+    outputs.deltas[i..][0..batch_lanes].* = delta;
+    outputs.gammas[i..][0..batch_lanes].* = gamma;
+    outputs.thetas[i..][0..batch_lanes].* = theta;
+    outputs.vegas[i..][0..batch_lanes].* = vega;
+    outputs.prices[i..][0..batch_lanes].* = price;
+
+    if (@reduce(.Or, degenerate)) {
+        @branchHint(.unlikely);
+        inline for (0..batch_lanes) |j| {
+            if (degenerate[j]) storeOne(outputs, i + j, priceOne(inputAt(inputs, i + j)));
+        }
     }
 }
 

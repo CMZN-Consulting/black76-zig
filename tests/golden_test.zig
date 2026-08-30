@@ -172,6 +172,78 @@ test "batch is bit-identical to the single-vector path" {
     try std.testing.expectEqualSlices(u64, @ptrCast(out), @ptrCast(out_c));
 }
 
+test "batch is bit-identical to the single path on random inputs, degenerate and special values included" {
+    // The fixture has no NaN and no +inf; this does. Batch runs the SIMD main
+    // path on every lane and hands guard-tripping lanes to the scalar kernel,
+    // so the two paths must agree everywhere: bit-for-bit where the answer is
+    // a number, isNan-for-isNan where it is not.
+    const gpa = std.testing.allocator;
+    const n: usize = 4096;
+    const fs = try gpa.alloc(f64, n);
+    defer gpa.free(fs);
+    const ks = try gpa.alloc(f64, n);
+    defer gpa.free(ks);
+    const ss = try gpa.alloc(f64, n);
+    defer gpa.free(ss);
+    const ts = try gpa.alloc(f64, n);
+    defer gpa.free(ts);
+    const kinds = try gpa.alloc(b76.Kind, n);
+    defer gpa.free(kinds);
+    const out = try gpa.alloc(f64, 5 * n);
+    defer gpa.free(out);
+
+    var prng = std.Random.DefaultPrng.init(0xb17c);
+    const r = prng.random();
+    const specials = [_]f64{ 0.0, -0.0, -1.0, 1e-30, 1e-11, 1e-10, std.math.inf(f64), -std.math.inf(f64), std.math.nan(f64), 500.0 };
+    for (0..n) |i| {
+        const magnitudes = [_]f64{ 0.5, 500.0, 500000.0 };
+        const magnitude = magnitudes[r.uintLessThan(usize, 3)];
+        fs[i] = magnitude;
+        ks[i] = magnitude / (0.05 + 20.0 * r.float(f64));
+        ss[i] = 0.01 + 3.0 * r.float(f64);
+        ts[i] = 1e-6 + 2.0 * r.float(f64);
+        kinds[i] = if (r.boolean()) .call else .put;
+        // One field in eight is a special value, so lanes mix ordinary and
+        // degenerate inputs the way a real book does.
+        if (r.uintLessThan(u8, 8) == 0) {
+            const which = r.uintLessThan(usize, 4);
+            const value = specials[r.uintLessThan(usize, specials.len)];
+            switch (which) {
+                0 => fs[i] = value,
+                1 => ks[i] = value,
+                2 => ss[i] = value,
+                else => ts[i] = value,
+            }
+        }
+    }
+    const outputs: b76.BatchOutputs = .{
+        .deltas = out[0 * n ..][0..n],
+        .gammas = out[1 * n ..][0..n],
+        .thetas = out[2 * n ..][0..n],
+        .vegas = out[3 * n ..][0..n],
+        .prices = out[4 * n ..][0..n],
+    };
+    b76.greeksBatch(.{ .forwards = fs, .strikes = ks, .sigmas = ss, .ttms = ts, .kinds = kinds }, outputs);
+
+    for (0..n) |i| {
+        const single = b76.greeks(.{ .forward = fs[i], .strike = ks[i], .sigma = ss[i], .ttm = ts[i], .kind = kinds[i] });
+        const pairs = [_][2]f64{
+            .{ single.delta, outputs.deltas[i] },
+            .{ single.gamma, outputs.gammas[i] },
+            .{ single.theta, outputs.thetas[i] },
+            .{ single.vega, outputs.vegas[i] },
+            .{ single.price, outputs.prices[i] },
+        };
+        for (pairs) |pair| {
+            if (std.math.isNan(pair[0]) or std.math.isNan(pair[1])) {
+                try std.testing.expect(std.math.isNan(pair[0]) and std.math.isNan(pair[1]));
+            } else {
+                try std.testing.expectEqual(bits(pair[0]), bits(pair[1]));
+            }
+        }
+    }
+}
+
 test "the three degenerate branches disagree at F == K, and that is on purpose" {
     // If a refactor ever "tidies" the branches together, this is the test that
     // says so in one screen instead of leaving you to diff 3,500 hex strings.
