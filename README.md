@@ -514,8 +514,18 @@ tests/libm_test.zig               exp/log vs compiler_rt; 4M samples under test,
 vectors/black76-golden.ndjson     3,516 vectors, schema 3, 1.5 MB
 vectors/black76-golden.v2.ndjson  the v2 numbers, on record
 vectors/black76-golden.v1.ndjson  the v1 numbers, on record
+bench/                            whole-binary optimisation harness for Graviton4 (bench/README.md)
+docs/research/                    the literature review the harness was built from
 .github/workflows/ci.yml          the gate, run on itself
 ```
+
+`zig build bench-driver` builds the benchmark driver; it is not part of the default
+install. The driver replays the fixture before it times anything, so a build
+flag or a post-link rewrite that moves a bit is reported as a gate failure,
+not as a faster number. It is a separate tool from `tools/bench.zig` above
+(that one is the everyday `zig build bench` timer this README's own speed
+table uses); the driver targets AWS Graviton4 build-variant comparisons, not
+a single number.
 
 The fixture format is one JSON object per line and needs no JSON library to read: find the key,
 take the next sixteen hex digits. `src/fixture.zig` is the reference implementation of that, and
