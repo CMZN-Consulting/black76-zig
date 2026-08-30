@@ -66,21 +66,34 @@ pub fn Lanes(comptime n: comptime_int) type {
 
             // k > 1023: scale up by 2^1023 once (exact unless it overflows,
             // and an overflow here is the right answer anyway).
+            //
+            // Uniform branch, same idiom as the tail branch in normal.phi: when
+            // no lane is out of range every `@select` below is an identity, so
+            // skipping them cannot move a bit. What it does remove is four
+            // dependent multiply/blend pairs sitting on the y -> result chain,
+            // which on the scalar path is pure latency for a case exp reaches
+            // only for |x| > 708.
             const big = k > splatI(1023);
-            y = @select(f64, big, y * splat(0x1p1023), y);
-            k = @select(i64, big, k - splatI(1023), k);
-            const big2 = k > splatI(1023);
-            y = @select(f64, big2, y * splat(0x1p1023), y);
-            k = @select(i64, big2, @min(k - splatI(1023), splatI(1023)), k);
+            if (@reduce(.Or, big)) {
+                @branchHint(.unlikely);
+                y = @select(f64, big, y * splat(0x1p1023), y);
+                k = @select(i64, big, k - splatI(1023), k);
+                const big2 = k > splatI(1023);
+                y = @select(f64, big2, y * splat(0x1p1023), y);
+                k = @select(i64, big2, @min(k - splatI(1023), splatI(1023)), k);
+            }
 
             // k < -1022: scale down by 2^-969 = 2^-1022 * 2^53, which keeps y
             // normal (so exact) and leaves the one rounding to the final step.
             const small = k < splatI(-1022);
-            y = @select(f64, small, y * splat(0x1p-1022 * 0x1p53), y);
-            k = @select(i64, small, k + splatI(1022 - 53), k);
-            const small2 = k < splatI(-1022);
-            y = @select(f64, small2, y * splat(0x1p-1022 * 0x1p53), y);
-            k = @select(i64, small2, @max(k + splatI(1022 - 53), splatI(-1022)), k);
+            if (@reduce(.Or, small)) {
+                @branchHint(.unlikely);
+                y = @select(f64, small, y * splat(0x1p-1022 * 0x1p53), y);
+                k = @select(i64, small, k + splatI(1022 - 53), k);
+                const small2 = k < splatI(-1022);
+                y = @select(f64, small2, y * splat(0x1p-1022 * 0x1p53), y);
+                k = @select(i64, small2, @max(k + splatI(1022 - 53), splatI(-1022)), k);
+            }
 
             // 2^k as a double: biased exponent in the top bits, nothing else.
             const two_k: U = @bitCast((k + splatI(0x3ff)) << @splat(52));
@@ -116,16 +129,26 @@ pub fn Lanes(comptime n: comptime_int) type {
             const x0 = if (any_special) @select(f64, special, splat(0.0), x_) else x_;
 
             // Argument reduction: x = k*ln2 + r, |r| <= 0.5*ln2.
+            //
+            // Uniform branch: with no lane past 0.5*ln2 every select below is
+            // an identity (k = 0, hi = x0, lo = 0), so the skip is bit-neutral.
+            // It takes a float -> int -> float round trip off the dependency
+            // chain that feeds the polynomial.
             const reduce = hx > splatU(0x3FD62E42); // |x| > 0.5*ln2
-            const far = hx > splatU(0x3FF0A2B2); // |x| >= 1.5*ln2
-            const half = @select(f64, negative, splat(-0.5), splat(0.5));
-            const k_far: I = @intFromFloat(splat(invln2) * x0 + half);
-            const k_near = @select(i64, negative, splatI(-1), splatI(1)); // 1 - sign - sign
-            const k = @select(i64, reduce, @select(i64, far, k_far, k_near), splatI(0));
+            var k: I = splatI(0);
+            var hi: F = x0;
+            var lo: F = splat(0.0);
+            if (@reduce(.Or, reduce)) {
+                const far = hx > splatU(0x3FF0A2B2); // |x| >= 1.5*ln2
+                const half = @select(f64, negative, splat(-0.5), splat(0.5));
+                const k_far: I = @intFromFloat(splat(invln2) * x0 + half);
+                const k_near = @select(i64, negative, splatI(-1), splatI(1)); // 1 - sign - sign
+                k = @select(i64, reduce, @select(i64, far, k_far, k_near), splatI(0));
 
-            const dk: F = @floatFromInt(k);
-            const hi = @select(f64, reduce, x0 - dk * splat(ln2hi), x0);
-            const lo = @select(f64, reduce, dk * splat(ln2lo), splat(0.0));
+                const dk: F = @floatFromInt(k);
+                hi = @select(f64, reduce, x0 - dk * splat(ln2hi), x0);
+                lo = @select(f64, reduce, dk * splat(ln2lo), splat(0.0));
+            }
             const x = hi - lo;
 
             const xx = x * x;
