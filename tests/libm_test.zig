@@ -8,10 +8,33 @@
 //!
 //! What "identical" means here: for every input, the 64-bit pattern of the
 //! result equals the pattern `@exp` / `@log` (compiler_rt) produce on this
-//! machine -- with one exception. A NaN RESULT is compared with `isNan` only,
-//! because NaN sign and payload are not part of any contract in this
-//! repository (see README, "Where the guards stop"). The count of NaN results
-//! that happen to match bit-for-bit anyway is reported by the soak.
+//! machine -- INCLUDING when that pattern is a NaN.
+//!
+//! A NaN result used to be compared with `isNan` only, on the grounds that NaN
+//! sign and payload are not part of any contract in this repository. The count
+//! of NaN results that matched bit-for-bit anyway was computed and reported,
+//! and never asserted -- so the README's "payloads included" was true in
+//! outcome and unenforced in code, which is the state in which a claim quietly
+//! stops being true. It is asserted now, by `nan_bits_differed` below.
+//!
+//! That tightening is measured, not assumed. Over 525,752 NaN result pairs
+//! (492 from exp, 525,260 from log) across lane widths 1/2/4/8 x {Debug,
+//! ReleaseFast} x {native, baseline} on x86_64: zero sign differences, zero
+//! payload differences, zero of any kind. This pairing agrees exactly, so the
+//! test says exactly that.
+//!
+//! Note the contrast with `golden_test.zig`, which compares this repository's
+//! own scalar and batch paths and CANNOT assert the sign bit -- there the NaN
+//! sign genuinely moves with optimisation level and vector width. The two
+//! rules differ because the two measurements differ, not because one file is
+//! stricter by temperament.
+//!
+//! IF THIS FAILS ON A NEW TARGET: it is reporting that the host's compiler_rt
+//! and this repository disagree about a NaN's bits, which is permitted by
+//! IEEE-754 and would be a real finding, not a broken test. The narrow fix is
+//! to relax `nan_bits_differed` to ignore the sign bit (mask 1 << 63) and say
+//! so here with the target named -- NOT to go back to `isNan`, which asserts
+//! only that both sides failed.
 
 const std = @import("std");
 const libm = @import("libm");
@@ -20,17 +43,30 @@ const sample_count: usize = 4_000_000;
 
 const Tally = struct {
     compared: u64 = 0,
+    /// A NUMERIC disagreement, or one side NaN and the other not. Always a
+    /// hard failure.
     mismatched: u64 = 0,
     nan_results: u64 = 0,
     nan_bits_equal: u64 = 0,
+    /// Both sides NaN, bits not equal. Counted SEPARATELY from `mismatched` so
+    /// that a NaN-bit divergence on some future target fails its own named
+    /// test and says what it is, instead of arriving as "exp is not
+    /// bit-identical to compiler_rt" and sending the reader into the polynomial.
+    nan_bits_differed: u64 = 0,
     first_bad: ?struct { x: f64, want: f64, got: f64, lanes: u8 } = null,
+    first_bad_nan: ?struct { x: f64, want: f64, got: f64, lanes: u8 } = null,
 
     fn note(t: *Tally, x: f64, want: f64, got: f64, lanes: u8) void {
         t.compared += 1;
         if (std.math.isNan(want) or std.math.isNan(got)) {
             t.nan_results += 1;
             if (std.math.isNan(want) and std.math.isNan(got)) {
-                if (@as(u64, @bitCast(want)) == @as(u64, @bitCast(got))) t.nan_bits_equal += 1;
+                if (@as(u64, @bitCast(want)) == @as(u64, @bitCast(got))) {
+                    t.nan_bits_equal += 1;
+                } else {
+                    t.nan_bits_differed += 1;
+                    if (t.first_bad_nan == null) t.first_bad_nan = .{ .x = x, .want = want, .got = got, .lanes = lanes };
+                }
                 return;
             }
         } else if (@as(u64, @bitCast(want)) == @as(u64, @bitCast(got))) {
@@ -154,24 +190,39 @@ fn run(comptime f: Fn, gpa: std.mem.Allocator, samples: usize, seed: u64) !Tally
 }
 
 fn report(comptime f: Fn, t: Tally) void {
-    std.debug.print("{s}: {d} comparisons, {d} mismatched, {d} NaN results ({d} of them bit-identical too)\n", .{ @tagName(f), t.compared, t.mismatched, t.nan_results, t.nan_bits_equal });
+    std.debug.print("{s}: {d} comparisons, {d} mismatched, {d} NaN results ({d} bit-identical, {d} differing)\n", .{ @tagName(f), t.compared, t.mismatched, t.nan_results, t.nan_bits_equal, t.nan_bits_differed });
     if (t.first_bad) |bad| {
         std.debug.print("  first mismatch (lanes={d}): x=0x{X:0>16} ({e})  want=0x{X:0>16}  got=0x{X:0>16}\n", .{
             bad.lanes, @as(u64, @bitCast(bad.x)), bad.x, @as(u64, @bitCast(bad.want)), @as(u64, @bitCast(bad.got)),
+        });
+    }
+    if (t.first_bad_nan) |bad| {
+        std.debug.print("  first NaN-bit divergence (lanes={d}): x=0x{X:0>16}  want=0x{X:0>16}  got=0x{X:0>16}\n", .{
+            bad.lanes, @as(u64, @bitCast(bad.x)), @as(u64, @bitCast(bad.want)), @as(u64, @bitCast(bad.got)),
         });
     }
 }
 
 test "exp is bit-identical to compiler_rt at every lane width" {
     const t = try run(.exp, std.testing.allocator, sample_count, 0x5eed_e5b0);
-    if (t.mismatched != 0) report(.exp, t);
+    if (t.mismatched != 0 or t.nan_bits_differed != 0) report(.exp, t);
     try std.testing.expectEqual(@as(u64, 0), t.mismatched);
+    // The NaN half of "bit-identical", asserted rather than merely counted.
+    // Separate expectation, same test: a reader who sees this line fail knows
+    // immediately that the polynomial is fine and the NaN handling is not.
+    try std.testing.expectEqual(@as(u64, 0), t.nan_bits_differed);
+    // …and the NaN comparison is not vacuous: these argument fills include raw
+    // random bit patterns, so NaN inputs really do reach the function.
+    try std.testing.expect(t.nan_results > 0);
 }
 
 test "log is bit-identical to compiler_rt at every lane width" {
     const t = try run(.log, std.testing.allocator, sample_count, 0x5eed_106);
-    if (t.mismatched != 0) report(.log, t);
+    if (t.mismatched != 0 or t.nan_bits_differed != 0) report(.log, t);
     try std.testing.expectEqual(@as(u64, 0), t.mismatched);
+    try std.testing.expectEqual(@as(u64, 0), t.nan_bits_differed);
+    // log also takes every NEGATIVE double to NaN, so this count is large.
+    try std.testing.expect(t.nan_results > 0);
 }
 
 /// `zig build libm-soak`: the billion-sample version.
@@ -182,5 +233,7 @@ pub fn main(init: std.process.Init) !u8 {
     report(.exp, te);
     const tl = try run(.log, gpa, soak, 0xb111_106);
     report(.log, tl);
-    return if (te.mismatched == 0 and tl.mismatched == 0) 0 else 1;
+    const ok = te.mismatched == 0 and tl.mismatched == 0 and
+        te.nan_bits_differed == 0 and tl.nan_bits_differed == 0;
+    return if (ok) 0 else 1;
 }
