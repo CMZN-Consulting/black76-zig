@@ -56,11 +56,29 @@ jobs:
       - name: Formatting
         run: zig fmt --check .
 
-      - name: Replay the golden vectors
+      # Debug runs the kernel's assertions; ReleaseFast is what ships. The
+      # fixture must replay bit-for-bit under both, which is also the claim
+      # that optimisation level is not part of the contract.
+      - name: Replay the golden vectors (Debug, assertions on)
         run: zig build test
+
+      - name: Replay the golden vectors (ReleaseFast, as shipped)
+        run: zig build test -Doptimize=ReleaseFast
+
+      # The batch path is SIMD and its lane count follows the CPU. The
+      # narrowest x86-64 build exercises the 2-lane path and its scalar tail;
+      # the runner's own CPU exercises the widest one it has.
+      - name: Replay at the narrowest lane width
+        run: zig build test -Doptimize=ReleaseFast -Dcpu=baseline
 
       - name: Re-capture and diff against the committed fixture
         run: zig build reproduce
 
       - name: Build the library
         run: zig build -Doptimize=ReleaseFast
+
+      # Informational: a number in the log, so a regression is visible in the
+      # history. Shared runners are noisy; this does not gate.
+      - name: Benchmark
+        continue-on-error: true
+        run: zig build bench -Doptimize=ReleaseFast
