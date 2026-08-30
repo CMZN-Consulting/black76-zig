@@ -120,6 +120,12 @@ pub fn build(b: *std.Build) void {
     // The fixture is embedded, so the test is hermetic: no cwd, no file I/O,
     // and `zig build test` means the same thing from any directory.
     test_mod.addAnonymousImport("golden_fixture", .{ .root_source_file = b.path("vectors/black76-golden.ndjson") });
+    // The kernel source, embedded into the TEST for the same reason the
+    // generator embeds it: the fixture header carries a fingerprint of the
+    // source that produced it, and until now nothing checked that the
+    // fingerprint was still true. `reproduce` cannot -- it diffs vector lines
+    // and deliberately ignores headers.
+    test_mod.addAnonymousImport("black76_source", .{ .root_source_file = b.path("src/black76.zig") });
 
     const golden = b.addTest(.{ .root_module = test_mod });
     const reader_tests = b.addTest(.{ .root_module = fixture_mod });

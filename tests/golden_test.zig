@@ -18,6 +18,7 @@ const b76 = @import("black76");
 const builtin = @import("builtin");
 const fx = @import("fixture");
 const fixture = @embedFile("golden_fixture");
+const kernel_source = @embedFile("black76_source");
 
 const bits = fx.bits;
 
@@ -107,6 +108,51 @@ test "fixture header is present and structurally sound" {
         if (!fx.isHeader(line)) counted += 1;
     }
     try std.testing.expectEqual(header.vector_count, counted);
+}
+
+test "the fixture header's source fingerprint is still true" {
+    // THE GAP THIS CLOSES. The header records `source_sha256` and
+    // `source_bytes` for `src/black76.zig`, which is the file's claim about
+    // WHICH kernel produced these numbers -- and nothing verified it. It
+    // cannot be `zig build reproduce`'s job: that tool diffs VECTOR lines and
+    // deliberately ignores headers, because headers legitimately differ per
+    // capture (zig version, target, cpu, optimize). So a fixture could carry a
+    // fingerprint of a kernel that no longer exists and every gate in the
+    // repository would stay green. That is not hypothetical -- it was found in
+    // a working tree whose committed fixture fingerprinted a source 456 bytes
+    // older than the kernel beside it, the difference being non-semantic, so
+    // the vector lines still matched and nothing said a word.
+    //
+    // With this test, provenance stops being a convention and becomes a gate:
+    // any edit to `src/black76.zig` turns the suite red until
+    // `zig build generate` re-runs. That is the right direction of friction for
+    // a repository whose entire subject is that the numbers came from a
+    // specific binary -- and note it fires on COMMENT-ONLY edits too, which is
+    // correct rather than annoying: the header claims a sha of the file, not of
+    // its semantics, and a fingerprint with exceptions is not a fingerprint.
+    const header_line = fixture[0 .. std.mem.indexOfScalar(u8, fixture, '\n') orelse fixture.len];
+
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(kernel_source, &digest, .{});
+    var expected: [64]u8 = undefined;
+    _ = try std.fmt.bufPrint(&expected, "{x}", .{&digest});
+
+    const stored_sha = try fx.strField(header_line, "source_sha256");
+    if (!std.mem.eql(u8, stored_sha, &expected)) {
+        std.debug.print(
+            \\
+            \\  The fixture was captured from a DIFFERENT src/black76.zig.
+            \\    header source_sha256 : {s}
+            \\    live   src/black76.zig: {s}
+            \\  Re-run `zig build generate` (and read the diff before committing it).
+            \\
+        , .{ stored_sha, expected });
+        return error.FixtureSourceFingerprintStale;
+    }
+
+    // The byte count is redundant with the sha and cheap, and it is the field a
+    // human reads first when the sha disagrees.
+    try std.testing.expectEqual(@as(u64, kernel_source.len), try fx.intField(header_line, "source_bytes"));
 }
 
 test "every golden vector reproduces bit-for-bit" {

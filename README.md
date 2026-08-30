@@ -98,7 +98,7 @@ Needs [Zig 0.16.0](https://ziglang.org/download/). Nothing else — no package r
 no C library, and since v2 not even the compiler's own `exp` and `log`.
 
 ```sh
-zig build test                            # replay all 3,516 vectors, bit-for-bit (22 tests)
+zig build test                            # replay all 3,516 vectors, bit-for-bit (23 tests)
 zig build reproduce                       # re-capture from scratch, diff against the file
 zig build cdf-delta                       # what the v1 -> v2 model change did to prices
 zig build assoc-delta                     # what the v2 -> v3' re-association moved
@@ -323,6 +323,23 @@ mostly not about code:
 kernel itself grew, which is what you would expect from putting `exp`, `log` and a 1e-15 CDF in the
 tree. Quoting the 11× without the 5× would be quoting a ratio without asking what was in the file.
 
+**And ReleaseSafe goes the other way, which is worth explaining rather than hiding.** The checked
+build is about **3.3 MB**, roughly **3.9×** v1's. Almost none of that is the pricer: **86 % is
+DWARF** — stripping leaves 467 KB with every safety check still live — and most of what remains is
+Zig's default panic handler, which symbolises its own stack traces and therefore links an ELF
+reader, a DWARF parser and a flate decompressor. The kernel's own contribution is measurable
+separately, on stripped ReleaseFast artifacts where none of that machinery is linked: **9,512 B →
+21,528 B, about +12 KB**. So the mode that grew 3.9× is the one whose entire job is to tell you what
+went wrong, and the mode you deploy is the one that got 11× smaller.
+
+No build knob ships for this, and the two obvious candidates are why. Turning off unwind tables
+makes the artifact **21,392 bytes LARGER**, not smaller. Turning off stack-check saves **960 bytes**,
+0.03 %. Everything that does move the number meaningfully — stripping, or disabling the panic
+handler — buys bytes by removing diagnostics from the diagnostic build, which is backwards. If a
+host genuinely needs a small checked artifact, `strip` the ReleaseSafe library yourself: the checks
+survive it intact and only the symbolised backtrace is lost. That is a decision for the host to make
+explicitly, not a default for this repository to make quietly.
+
 A different CPU architecture used to be the thing this file would not claim, because nothing had
 checked it. It has been checked: **aarch64 replays the fixture bit-for-bit**, so CI's ARM job is
 **gating** rather than informational, and cross-architecture bit-identity is now a promise this
@@ -509,7 +526,7 @@ tools/diff_vectors.zig            vector-line diff, ignoring provenance headers
 tools/cdf_delta.zig               the v1 -> v2 price-impact measurement
 tools/assoc_delta.zig             the v2 -> v3' re-association impact measurement
 tools/bench.zig                   ns/option
-tests/golden_test.zig             replays the fixture; 15 tests
+tests/golden_test.zig             replays the fixture; 16 tests
 tests/libm_test.zig               exp/log vs compiler_rt; 4M samples under test, 1e9 under soak
 vectors/black76-golden.ndjson     3,516 vectors, schema 3, 1.5 MB
 vectors/black76-golden.v2.ndjson  the v2 numbers, on record
