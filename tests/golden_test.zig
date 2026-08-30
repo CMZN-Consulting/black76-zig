@@ -286,6 +286,111 @@ test "batch is bit-identical to the single path on random inputs, degenerate and
     }
 }
 
+test "batch and single agree at every batch size, remainder lanes included" {
+    // THE GAP THIS CLOSES. The random test above runs n = 4096, which is a
+    // multiple of 1, 2, 4 and 8 -- of every value `batch_lanes` can take. So
+    // `greeksBatch`'s scalar tail (`while (i < n) : (i += 1)`) never executed
+    // under it, on any target: the main loop was exercised 4,096 times over and
+    // the tail exactly zero times. A remainder handled wrongly -- a lane
+    // dropped, one written twice, an off-by-one on the final store -- passed
+    // the entire suite.
+    //
+    // The sizes below are chosen so that n % batch_lanes != 0 for EVERY lane
+    // width the kernel can compile to, not merely the host's. 0..17 covers
+    // 2*widest+1 exhaustively; the primes cannot be a multiple of any lane
+    // width above 1; the large awkward sizes run a long main loop followed by a
+    // near-full-width tail. n = 0 is included because an empty batch is a call
+    // a caller can make.
+    const gpa = std.testing.allocator;
+    const sizes = [_]usize{
+        0,   1,   2,   3,   4,   5,    6,    7,  8,  9,  10, 11, 12, 13, 14, 15, 16, 17,
+        19,  23,  29,  31,  37,  41,   43,   47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97,
+        101, 103, 127, 251, 509, 1021, 4093,
+    };
+
+    var prng = std.Random.DefaultPrng.init(0x7a11);
+    const r = prng.random();
+    // The same special-value mix the random test uses, so the tail meets
+    // guard-tripping lanes and not only ordinary ones -- agreeing with the
+    // scalar kernel on the degenerate branches is most of the tail's job.
+    const specials = [_]f64{ 0.0, -0.0, -1.0, 1e-30, 1e-11, 1e-10, std.math.inf(f64), -std.math.inf(f64), std.math.nan(f64), 500.0 };
+
+    for (sizes) |n| {
+        const fs = try gpa.alloc(f64, n);
+        defer gpa.free(fs);
+        const ks = try gpa.alloc(f64, n);
+        defer gpa.free(ks);
+        const ss = try gpa.alloc(f64, n);
+        defer gpa.free(ss);
+        const ts = try gpa.alloc(f64, n);
+        defer gpa.free(ts);
+        const kinds = try gpa.alloc(b76.Kind, n);
+        defer gpa.free(kinds);
+        const out = try gpa.alloc(f64, 5 * n);
+        defer gpa.free(out);
+
+        for (0..n) |i| {
+            const magnitudes = [_]f64{ 0.5, 500.0, 500000.0 };
+            fs[i] = magnitudes[r.uintLessThan(usize, 3)];
+            ks[i] = fs[i] / (0.05 + 20.0 * r.float(f64));
+            ss[i] = 0.01 + 3.0 * r.float(f64);
+            ts[i] = 1e-6 + 2.0 * r.float(f64);
+            kinds[i] = if (r.boolean()) .call else .put;
+            if (r.uintLessThan(u8, 8) == 0) {
+                const value = specials[r.uintLessThan(usize, specials.len)];
+                switch (r.uintLessThan(usize, 4)) {
+                    0 => fs[i] = value,
+                    1 => ks[i] = value,
+                    2 => ss[i] = value,
+                    else => ts[i] = value,
+                }
+            }
+        }
+
+        const outputs: b76.BatchOutputs = .{
+            .deltas = out[0 * n ..][0..n],
+            .gammas = out[1 * n ..][0..n],
+            .thetas = out[2 * n ..][0..n],
+            .vegas = out[3 * n ..][0..n],
+            .prices = out[4 * n ..][0..n],
+        };
+        b76.greeksBatch(.{ .forwards = fs, .strikes = ks, .sigmas = ss, .ttms = ts, .kinds = kinds }, outputs);
+
+        for (0..n) |i| {
+            const single = b76.greeks(.{ .forward = fs[i], .strike = ks[i], .sigma = ss[i], .ttm = ts[i], .kind = kinds[i] });
+            const pairs = [_][2]f64{
+                .{ single.delta, outputs.deltas[i] },
+                .{ single.gamma, outputs.gammas[i] },
+                .{ single.theta, outputs.thetas[i] },
+                .{ single.vega, outputs.vegas[i] },
+                .{ single.price, outputs.prices[i] },
+            };
+            for (pairs) |pair| {
+                if (samePath(pair[0], pair[1])) continue;
+                std.debug.print(
+                    "\n  batch/single disagree at n={d} index {d} (lanes={d}, tail starts at {d})\n    single 0x{X:0>16}  batch 0x{X:0>16}\n",
+                    .{ n, i, b76.batch_lanes, n - (n % b76.batch_lanes), bits(pair[0]), bits(pair[1]) },
+                );
+                return error.BatchSingleMismatch;
+            }
+        }
+    }
+}
+
+test "the swept batch sizes really do reach the scalar tail on this target" {
+    // The sweep above is only a REMAINDER test if some size in it leaves one.
+    // That depends on `batch_lanes`, a comptime property of the target -- so on
+    // a scalar target (batch_lanes == 1) every size divides evenly and the
+    // sweep silently degrades into another main-path test. This says which of
+    // the two just ran.
+    if (b76.batch_lanes == 1) return; // no tail exists to reach
+    try std.testing.expect(17 % b76.batch_lanes != 0);
+    try std.testing.expect(4093 % b76.batch_lanes != 0);
+    // And the widest supported width still leaves a remainder on the primes,
+    // so this file stays a tail test if AVX-512 (8 lanes) is what compiles.
+    try std.testing.expect(4093 % 8 != 0);
+}
+
 test "NaN divergence between the two live paths is sign-only, never payload" {
     // The exclusion in `samePath` is a licence, so it gets its own guard. If a
     // future change makes the batch path produce a DIFFERENT NaN payload -- a
