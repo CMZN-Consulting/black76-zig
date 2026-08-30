@@ -65,6 +65,12 @@ jobs:
       - name: Replay the golden vectors (ReleaseFast, as shipped)
         run: zig build test -Doptimize=ReleaseFast
 
+      # The batch path is SIMD and its lane count follows the CPU. The
+      # narrowest x86-64 build exercises the 2-lane path and its scalar tail;
+      # the runner's own CPU exercises the widest one it has.
+      - name: Replay at the narrowest lane width
+        run: zig build test -Doptimize=ReleaseFast -Dcpu=baseline
+
       - name: Re-capture and diff against the committed fixture
         run: zig build reproduce
 
