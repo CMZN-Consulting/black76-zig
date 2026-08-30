@@ -138,6 +138,23 @@ pub fn build(b: *std.Build) void {
     const bench = b.addExecutable(.{ .name = "bench", .root_module = bench_mod });
     b.step("bench", "Time the kernel (use -Doptimize=ReleaseFast)").dependOn(&b.addRunArtifact(bench).step);
 
+    // -- assoc-delta: price the v2 -> v3 re-association ----------------------
+    // Built to the `cdf-delta` template, and for the same reason: a model
+    // change that moves golden vectors has to ship with the instrument that
+    // measures what it moved. It embeds the RETAINED v2 fixture rather than the
+    // current one, so it keeps measuring this change after regeneration --
+    // exactly as `cdf-delta` keeps measuring v1 -> v2.
+    const assoc_mod = b.createModule(.{
+        .root_source_file = b.path("tools/assoc_delta.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    assoc_mod.addImport("black76", b76_mod);
+    assoc_mod.addImport("fixture", fixture_mod);
+    assoc_mod.addAnonymousImport("golden_fixture_v2", .{ .root_source_file = b.path("vectors/black76-golden.v2.ndjson") });
+    const assoc_delta = b.addExecutable(.{ .name = "assoc-delta", .root_module = assoc_mod });
+    b.step("assoc-delta", "Measure what the v2 -> v3 re-association moved").dependOn(&b.addRunArtifact(assoc_delta).step);
+
     // -- Reproduce: capture again, diff against the committed file -----------
     // The acceptance test for the capture itself. Header lines differ by design
     // (they carry provenance); vector lines must not differ at all.

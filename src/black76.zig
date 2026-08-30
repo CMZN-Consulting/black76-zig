@@ -7,9 +7,16 @@
 //! exp, log and the normal distribution live in this repository (src/libm.zig,
 //! src/normal.zig), so those bits depend on nothing outside it either.
 //!
-//! Model, with the discount factor written out:
+//! Model, with the discount factor written out. Writing s for sigma*sqrt(T),
+//! d1 is evaluated as `A/s + s/2` and NOT as the algebraically equal
+//! `[A + 0.5*sigma^2*T]/s`, and A as `ln(F/K)` with a fallback to
+//! `ln(F) - ln(K)` only where the ratio itself over- or underflows. Those are
+//! the v2 -> v3 model change: they keep every intermediate finite without
+//! giving up a digit at the money. `zig build assoc-delta` prices the
+//! difference; see `logMoneyness` for why the fallback is conditional.
 //!
-//!   d1    = [ln(F/K) + 0.5*sigma^2*T] / (sigma*sqrt(T))
+//!   A     = ln(F/K)
+//!   d1    = A/(sigma*sqrt(T)) + sigma*sqrt(T)/2
 //!   d2    = d1 - sigma*sqrt(T)
 //!   Call  = e^{-rT} * [F*N(d1) - K*N(d2)]
 //!   Put   = e^{-rT} * [K*N(-d2) - F*N(-d1)]
@@ -26,11 +33,11 @@
 //!      is no /365 anywhere below. Any per-day convention belongs above this
 //!      boundary, in the caller.
 //!
-//! Degenerate inputs (T<=0, sigma<=0, F<=0, K<=0, and sigma*sqrt(T) underflow)
-//! are handled by four separate early-return branches, checked in a fixed
-//! order. They do NOT all agree with each other at F == K -- see the README.
-//! That disagreement is observable, pinned by the golden vectors, and must be
-//! preserved by any reimplementation.
+//! Degenerate inputs (T<=0, sigma<=0, F<=0, K<=0, and sigma*sqrt(T) either
+//! vanishing or unbounded) are handled by five separate early-return branches,
+//! checked in a fixed order. The three intrinsic ones do NOT all agree with
+//! each other at F == K -- see the README. That disagreement is observable,
+//! pinned by the golden vectors, and must be preserved by any reimplementation.
 //!
 //! Two surfaces are exported:
 //!
@@ -147,6 +154,36 @@ pub const BatchOutputs = struct {
 /// +/-inf and the arithmetic stops meaning anything.
 pub const sigma_sqrt_t_min: f64 = 1e-10;
 
+/// Above this, sigma*sqrt(T) is treated as unbounded. The other end of exactly
+/// the same problem `sigma_sqrt_t_min` guards, on exactly the same quantity:
+/// there the denominator of A/s vanished, here s itself runs away.
+///
+/// Model v3 writes d1 as `A/s + s/2` rather than `(A + 0.5*sigma^2*T)/s`, which
+/// leaves `s = sigma*sqrt(T)` as the ONE quantity in the whole kernel that can
+/// still overflow (see the note on `priceOne`). So a bound on s is now not just
+/// sufficient, it is the only bound there is anything to state. Under v2's
+/// association a bound on s was provably NOT enough -- `0.5*sigma*sigma`
+/// overflowed on its own at sigma > sqrt(2*floatMax) = 1.8964e154 while s
+/// stayed small -- and that is precisely what the re-association removed.
+///
+/// The value is bounded on one side only, and loosely:
+///
+///   * There is no upper constraint. Every finite s produces a finite,
+///     correctly-signed d1 and d2, so the guard exists to catch s = +inf and
+///     nothing else. Any finite threshold is safe.
+///   * The lower constraint is the plateau. N(d2) is exactly 0 once d2 < -37
+///     and N(d1) exactly 1 once d1 > ~8.3; with |A| < 1455 the worst case is
+///     `0.5*s - 1455/s > 37`, satisfied from s = 110 upward. So from s ~ 110 to
+///     floatMax -- about 306 decades -- the main path already returns df*F for
+///     a call and df*K for a put, to the bit, for every F and K.
+///
+/// 1e10 sits eight decades inside that plateau, so the guard is a continuation
+/// of the main path and not a cliff, and it cannot fire on anything real: it
+/// needs sigma > 1e9 at T = 100 years, a volatility of 1e11 percent. It is
+/// written as the mirror of `sigma_sqrt_t_min` because that reads well and the
+/// margin is enormous either way -- not because 1e-10 derives it.
+pub const sigma_sqrt_t_max: f64 = 1e10;
+
 // -- Standard normal distribution ---------------------------------------------
 
 /// N(x), N(-x) and n(x) from ONE exponential (see src/normal.zig). The kernel
@@ -188,8 +225,9 @@ pub fn normalPDF(x: f64) f64 {
 /// Price and Greeks for one option. Pure; never allocates; never traps.
 ///
 /// Guard order is part of the contract: invalid -> expired -> zero vol ->
-/// asymptotic. NaN and +inf are NOT caught by the `<= 0` tests and propagate;
-/// validate inputs above this boundary.
+/// vanishing sigma*sqrt(T) -> unbounded sigma*sqrt(T). NaN is NOT caught by any
+/// of them and propagates; +inf in sigma or ttm reaches guard 5, +inf in
+/// forward or strike does not. Validate inputs above this boundary.
 pub fn greeks(in: Input) Greeks {
     return priceOne(in);
 }
@@ -228,6 +266,15 @@ inline fn priceOne(in: Input) Greeks {
         return intrinsic(in, .zero_delta_at_the_money);
     }
 
+    // Guard 5: sigma*sqrt(T) so large the maths breaks down the other way. The
+    // only quantity left that can overflow is s itself, and once it is +inf,
+    // d2 = d1 - s is inf - inf = NaN. Spelled `> max` and not `!(<= max)` so
+    // that a NaN falls through and propagates, exactly as guards 1-4 let it.
+    if (sigma_sqrt_t > sigma_sqrt_t_max) {
+        @branchHint(.unlikely);
+        return asymptote(in);
+    }
+
     // Main path. The assertions restate the guards in NaN-transparent form:
     // a NaN input must fall through and propagate, never trap.
     assert(!(in.forward <= 0.0));
@@ -235,9 +282,22 @@ inline fn priceOne(in: Input) Greeks {
     assert(!(in.ttm <= 0.0));
     assert(!(in.sigma <= 0.0));
     assert(!(sigma_sqrt_t < sigma_sqrt_t_min));
+    assert(!(sigma_sqrt_t > sigma_sqrt_t_max));
 
     // r = 0, so the discount factor e^{-rT} is exactly 1 and is not written.
-    const d1 = (log(in.forward / in.strike) + 0.5 * in.sigma * in.sigma * in.ttm) / sigma_sqrt_t;
+    //
+    // Model v3 association. `logMoneyness` keeps |A| < 1455 for every finite
+    // positive F and K, where v2's bare `log(F/K)` could inherit an infinity
+    // from a ratio that had already over- or underflowed. `A/s + s/2` never
+    // forms 0.5*sigma^2*T, which under v2 could overflow on its own and
+    // collapse d1 and d2 onto the same +inf -- the negative-price defect.
+    //
+    // Bounded by the two guards above, every intermediate here is finite by
+    // construction: |A/s| <= 1455e10, `0.5*s` cannot overflow because halving
+    // cannot, and their sum and difference are bounded by the larger of them.
+    // That is the whole reason guard 5 can be a bound on s and nothing else.
+    const a = logMoneyness(in.forward, in.strike);
+    const d1 = a / sigma_sqrt_t + 0.5 * sigma_sqrt_t;
     const d2 = d1 - sigma_sqrt_t;
 
     // Two exponentials per option, and that is all: N(d1), N(-d1) and n(d1)
@@ -270,6 +330,39 @@ inline fn priceOne(in: Input) Greeks {
     return out;
 }
 
+/// ln(F/K), by whichever of the two forms is trustworthy for these arguments.
+///
+/// `log(F/K)` is the accurate one and is what runs for every option anyone has
+/// ever quoted: near the money F and K agree to many digits, and `log(F) -
+/// log(K)` is then a subtraction of two nearly equal numbers that throws away
+/// most of them. Measured on the golden grid, the difference-of-logs form is
+/// 8.8x worse in d1 on average and 8.6x worse at the money (`zig build
+/// assoc-delta`, and the 50-digit cross-check behind it).
+///
+/// But `F/K` is itself a rounding, and for finite F and K hundreds of decades
+/// apart it can overflow to +inf or underflow to 0 before `log` ever sees it --
+/// and then d1 inherits an infinity, N(d1) saturates, and a deep-out-of-the-
+/// money put reports delta = -1.0 when the truth is -0.0. So the ratio is used
+/// where it survives and the difference of logs only where it does not, which
+/// is exactly the regime where F and K are so far apart that the subtraction
+/// has nothing left to cancel. Each form is used only where it is the good one.
+///
+/// The lower test is against the smallest NORMAL double, not against zero. A
+/// ratio that lands in the subnormal range has not vanished, but it has already
+/// thrown away most of its mantissa, and `log` of it is wrong in the digits
+/// that matter -- measured: 15 inputs in an 11.8M sweep, all with F and K some
+/// 300 decades apart. Written so that a NaN fails both tests and takes the
+/// second branch, propagating as everything else here does.
+inline fn logMoneyness(forward: f64, strike: f64) f64 {
+    const ratio = forward / strike;
+    if (ratio >= std.math.floatMin(f64) and ratio < std.math.inf(f64)) {
+        return log(ratio);
+    } else {
+        @branchHint(.unlikely);
+        return log(forward) - log(strike);
+    }
+}
+
 const AtTheMoney = enum { half_delta_at_the_money, zero_delta_at_the_money };
 
 /// Intrinsic value with zero gamma, theta and vega. Shared by three guards,
@@ -295,6 +388,46 @@ inline fn intrinsic(in: Input, atm: AtTheMoney) Greeks {
     assert(!(out.price < 0.0));
     return out;
 }
+
+/// The large-variance asymptote, with zero gamma and vega. Used by guard 5.
+///
+/// d1 = log(F/K)/s + s/2 and d2 = d1 - s, so as s = sigma*sqrt(T) grows the two
+/// run apart without limit: d1 -> +inf and d2 -> -inf, hence N(d1) -> 1 and
+/// N(d2) -> 0. A call is then worth df*[F*1 - K*0] = df*F and a put
+/// df*[K*1 - F*0] = df*K, and with r = 0 the discount factor is the literal 1.
+/// Delta follows the same limit: N(d1) -> 1 for a call and -N(-d1) -> -0 for a
+/// put. The densities go the other way -- n(d1) ~ exp(-s^2/8) beats every
+/// polynomial in front of it -- so gamma and vega vanish, and theta, which is
+/// minus a density, vanishes from below.
+///
+/// Every one of those values is what the main path ALREADY returns throughout
+/// the plateau below the guard, down to the sign of each zero; see the note on
+/// `sigma_sqrt_t_max`. This branch exists to carry them across the point where
+/// the arithmetic can no longer produce them, not to introduce them.
+inline fn asymptote(in: Input) Greeks {
+    var out: Greeks = Greeks.zero;
+    switch (in.kind) {
+        .call => {
+            out.price = in.forward;
+            out.delta = 1.0;
+        },
+        .put => {
+            out.price = in.strike;
+            out.delta = negative_zero;
+        },
+    }
+    // Minus a vanishing density, so negative zero -- as on the main path, where
+    // the sign bit of a zero theta says which branch produced it. This is the
+    // one degenerate branch that is a limit of the formula rather than a
+    // replacement for it, so it keeps the formula's sign.
+    out.theta = negative_zero;
+    assert(!(out.price < 0.0));
+    return out;
+}
+
+/// -0.0 as a value, not as a literal: `-0.0` written inline is a comptime float
+/// and can be folded to +0.0 before it ever reaches an f64.
+const negative_zero: f64 = @bitCast(@as(u64, 1) << 63);
 
 /// Lanes in the SIMD batch path: the widest f64 vector the target does in one
 /// register (8 on AVX-512, 4 on AVX2, 2 on SSE2/NEON), or 1 where there is no
@@ -363,7 +496,7 @@ inline fn priceLanes(inputs: BatchInputs, outputs: BatchOutputs, i: usize) void 
     const kind_bytes: @Vector(batch_lanes, u8) = @as([batch_lanes]u8, @bitCast(inputs.kinds[i..][0..batch_lanes].*));
     const is_call = kind_bytes == @as(@Vector(batch_lanes, u8), @splat(@intFromEnum(Kind.call)));
 
-    // The four guards, as lane masks. Any lane that trips one is recomputed
+    // The five guards, as lane masks. Any lane that trips one is recomputed
     // below by the scalar kernel, which is the authority on what they return
     // and in which order they apply. The main path still runs on those lanes
     // (garbage in, garbage out, nothing traps); their results are discarded.
@@ -372,11 +505,23 @@ inline fn priceLanes(inputs: BatchInputs, outputs: BatchOutputs, i: usize) void 
     const invalid = @select(bool, forward <= vsplat(0.0), forward <= vsplat(0.0), strike <= vsplat(0.0));
     const expired = ttm <= vsplat(0.0);
     const zero_vol = sigma <= vsplat(0.0);
-    const asymptotic = sigma_sqrt_t < vsplat(sigma_sqrt_t_min);
-    const degenerate = @select(bool, invalid, invalid, @select(bool, expired, expired, @select(bool, zero_vol, zero_vol, asymptotic)));
+    const vanishing = sigma_sqrt_t < vsplat(sigma_sqrt_t_min);
+    const unbounded = sigma_sqrt_t > vsplat(sigma_sqrt_t_max);
+    // A sixth mask, and the reason it is a mask and not a `@select` over two
+    // logarithms: `logMoneyness` falls back to log(F) - log(K) when the ratio
+    // over- or underflows, and evaluating BOTH forms on every lane would cost a
+    // second and third log per option in the hot path for a case that never
+    // happens. Handing the lane to the scalar kernel costs nothing and reuses
+    // the mechanism already here, which is also the one that keeps the scalar
+    // kernel the single authority on what these branches return.
+    const ratio = forward / strike;
+    const ratio_blown = @select(bool, ratio >= vsplat(std.math.floatMin(f64)), ratio >= vsplat(std.math.inf(f64)), @as(VB, @splat(true)));
+    const degenerate = @select(bool, invalid, invalid, @select(bool, expired, expired, @select(bool, zero_vol, zero_vol, @select(bool, vanishing, vanishing, @select(bool, unbounded, unbounded, ratio_blown)))));
 
-    // Main path: the scalar formulas, verbatim, over lanes.
-    const d1 = (LN.log(forward / strike) + vsplat(0.5) * sigma * sigma * ttm) / sigma_sqrt_t;
+    // Main path: the scalar formulas, verbatim, over lanes. One log, as before:
+    // the lanes that would need the other form were masked out above.
+    const a = LN.log(ratio);
+    const d1 = a / sigma_sqrt_t + vsplat(0.5) * sigma_sqrt_t;
     const d2 = d1 - sigma_sqrt_t;
     const p1 = NN.phi(d1);
     const p2 = NN.phi(d2);

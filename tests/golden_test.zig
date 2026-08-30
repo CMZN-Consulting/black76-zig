@@ -99,7 +99,7 @@ fn greeksVia(comptime path: enum { zig, c_abi }, in: b76.Input) b76.Greeks {
 
 test "fixture header is present and structurally sound" {
     const header = try fx.parseHeader(fixture);
-    try std.testing.expectEqualStrings("black76-golden/2", header.schema);
+    try std.testing.expectEqualStrings("black76-golden/3", header.schema);
 
     var counted: usize = 0;
     var it = std.mem.tokenizeScalar(u8, fixture, '\n');
