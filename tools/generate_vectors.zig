@@ -243,7 +243,7 @@ fn writeHeader(w: *std.Io.Writer) !void {
     std.crypto.hash.sha2.Sha256.hash(source_text, &src_digest, .{});
 
     try w.print(
-        \\{{"header":1,"schema":"black76-golden/1","zig_version":"{s}","target":"{s}-{s}-{s}","cpu":"{s}","optimize":"{s}","source_sha256":"{x}","source_bytes":{d},"vector_count":{d},"r":"0.0 hardcoded","theta_units":"per year","ttm_units":"years"}}
+        \\{{"header":1,"schema":"black76-golden/2","zig_version":"{s}","target":"{s}-{s}-{s}","cpu":"{s}","optimize":"{s}","source_sha256":"{x}","source_bytes":{d},"vector_count":{d},"r":"0.0 hardcoded","theta_units":"per year","ttm_units":"years"}}
         \\
     , .{
         builtin.zig_version_string,

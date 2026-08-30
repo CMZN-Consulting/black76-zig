@@ -12,12 +12,20 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // The normal distribution, lane-generic, on top of libm.
+    const normal_mod = b.createModule(.{
+        .root_source_file = b.path("src/normal.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "libm", .module = libm_mod }},
+    });
+
     // -- The kernel, as a module and as a C-ABI library ----------------------
     const b76_mod = b.createModule(.{
         .root_source_file = b.path("src/black76.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "libm", .module = libm_mod }},
+        .imports = &.{ .{ .name = "libm", .module = libm_mod }, .{ .name = "normal", .module = normal_mod } },
     });
 
     // Shared object: dlopen this and call black76_greeks / black76_greeks_batch.
@@ -36,7 +44,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/black76.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "libm", .module = libm_mod }},
+            .imports = &.{ .{ .name = "libm", .module = libm_mod }, .{ .name = "normal", .module = normal_mod } },
         }),
         .linkage = .static,
     });
@@ -100,10 +108,13 @@ pub fn build(b: *std.Build) void {
     const libm_soak = b.addExecutable(.{ .name = "libm-soak", .root_module = libm_test_mod });
     b.step("libm-soak", "Compare in-repo exp/log with compiler_rt over 1e9 samples").dependOn(&b.addRunArtifact(libm_soak).step);
 
+    const normal_tests = b.addTest(.{ .root_module = normal_mod });
+
     const test_step = b.step("test", "Replay the golden fixture and compare bit-for-bit");
     test_step.dependOn(&b.addRunArtifact(golden).step);
     test_step.dependOn(&b.addRunArtifact(reader_tests).step);
     test_step.dependOn(&b.addRunArtifact(libm_tests).step);
+    test_step.dependOn(&b.addRunArtifact(normal_tests).step);
 
     // -- cdf-delta: price the cost of "just use a better CDF" ----------------
     const cdf_mod = b.createModule(.{

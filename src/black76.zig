@@ -4,6 +4,8 @@
 //! arguments: no allocator, no global state, no I/O, and every floating-point
 //! operation is evaluated in strict IEEE-754 mode so that the same source
 //! produces the same bits on every optimisation level (see `vectors/`).
+//! exp, log and the normal distribution live in this repository (src/libm.zig,
+//! src/normal.zig), so those bits depend on nothing outside it either.
 //!
 //! Model, with the discount factor written out:
 //!
@@ -41,14 +43,13 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const libm = @import("libm");
+const normal = @import("normal");
 
-/// Scalar exp/log from src/libm.zig, so the kernel's bits depend on this
-/// repository and not on whichever compiler_rt or libc happens to be linked.
+/// Scalar exp/log and normal distribution from this repository, so the
+/// kernel's bits depend on nothing outside it -- not on whichever compiler_rt
+/// or libc happens to be linked.
 const L1 = libm.Lanes(1);
-
-inline fn exp(x: f64) f64 {
-    return L1.exp(L1.splat(x))[0];
-}
+const N1 = normal.Lanes(1);
 
 inline fn log(x: f64) f64 {
     return L1.log(L1.splat(x))[0];
@@ -148,13 +149,13 @@ pub const sigma_sqrt_t_min: f64 = 1e-10;
 
 // -- Standard normal distribution ---------------------------------------------
 
-/// N(x), N(-x) and n(x) from ONE exponential. The kernel needs all three for
-/// d1 (both tails for the put, the density for the Greeks), and asking for them
-/// together states the sharing in the source instead of hoping the optimiser
-/// notices that exp(-x^2/2) is the same number every time. It is: measured, a
-/// kernel that calls the three functions separately runs ~30% slower once the
-/// exp is inlined, because common-subexpression elimination stops seeing
-/// through the branches.
+/// N(x), N(-x) and n(x) from ONE exponential (see src/normal.zig). The kernel
+/// needs all three for d1 and two of them for d2, and asking for them together
+/// states the sharing in the source instead of hoping the optimiser notices
+/// that exp(-x^2/2) is the same number every time. Measured: a kernel that
+/// called three separate functions ran ~30% slower once the exp was inlined,
+/// because common-subexpression elimination stopped seeing through the
+/// branches.
 pub const Phi = struct {
     /// N(x)
     pos: f64,
@@ -164,32 +165,12 @@ pub const Phi = struct {
     pdf: f64,
 };
 
-/// Abramowitz & Stegun 26.2.17 -- rational polynomial approximation.
-/// Maximum absolute error < 7.5e-8.
-///
-/// This is an APPROXIMATION, chosen on purpose. Swapping it for an erf-based or
-/// correctly-rounded CDF changes prices in the 8th decimal and is a different
-/// model, not a cleanup. The golden vectors exist to make that swap loud.
-///
-/// N(-x) is computed literally as `1 - N(|x|)`, so the reflection identity is
-/// exact by construction and not merely approximate. (At x == +/-0 both
-/// branches see `x >= 0` and return the positive form.)
+/// Model v2: Hart's rational approximation (West 2005), ~1e-15, lower tail
+/// computed directly. v1 was Abramowitz & Stegun 26.2.17 (|err| < 7.5e-8,
+/// lower tail as 1 - N(|x|)); `zig build cdf-delta` prices the difference.
 pub fn phi(x: f64) Phi {
-    const b1: f64 = 0.319381530;
-    const b2: f64 = -0.356563782;
-    const b3: f64 = 1.781477937;
-    const b4: f64 = -1.821255978;
-    const b5: f64 = 1.330274429;
-    const p: f64 = 0.2316419;
-    const ax = @abs(x);
-    const k = 1.0 / (1.0 + p * ax);
-    const pdf = normalPDF(ax);
-    const n_pos = 1.0 - pdf * (((((b5 * k + b4) * k + b3) * k + b2) * k + b1) * k);
-    return .{
-        .pos = if (x >= 0.0) n_pos else 1.0 - n_pos,
-        .neg = if (-x >= 0.0) n_pos else 1.0 - n_pos,
-        .pdf = pdf,
-    };
+    const p = N1.phi(N1.splat(x));
+    return .{ .pos = p.pos[0], .neg = p.neg[0], .pdf = p.pdf[0] };
 }
 
 /// Standard normal CDF, N(x). See `phi`.
@@ -197,11 +178,9 @@ pub fn normalCDF(x: f64) f64 {
     return phi(x).pos;
 }
 
-/// Standard normal PDF: n(x) = (1/sqrt(2*pi)) * exp(-x^2/2). Sign-symmetric in
-/// x to the bit, since x*x is.
+/// Standard normal PDF, n(x) = exp(-x^2/2) / sqrt(2*pi). See `phi`.
 pub fn normalPDF(x: f64) f64 {
-    const inv_sqrt_2pi: f64 = 0.3989422804014327; // 1 / sqrt(2*pi)
-    return inv_sqrt_2pi * exp(-0.5 * x * x);
+    return phi(x).pdf;
 }
 
 // -- Black-76 core ------------------------------------------------------------

@@ -57,7 +57,7 @@ fn greeksVia(comptime path: enum { zig, c_abi }, in: b76.Input) b76.Greeks {
 
 test "fixture header is present and structurally sound" {
     const header = try fx.parseHeader(fixture);
-    try std.testing.expectEqualStrings("black76-golden/1", header.schema);
+    try std.testing.expectEqualStrings("black76-golden/2", header.schema);
 
     var counted: usize = 0;
     var it = std.mem.tokenizeScalar(u8, fixture, '\n');
@@ -216,16 +216,20 @@ test "invalid inputs return five zeros, not NaN" {
     }
 }
 
-test "normalCDF reflects exactly: N(-x) == 1 - N(x) for x != 0" {
-    // Documented in the README, so it is pinned here. A&S 26.2.17 as written
-    // computes the negative branch AS `1 - n_pos`, so the reflection is not
-    // approximate -- it is the same expression. Anyone porting this should know
-    // that, because it means the "well-conditioned separate evaluation" the put
-    // path looks like it is doing is not actually doing it.
+test "the lower tail is computed directly, not as 1 - N(|x|)" {
+    // Model v2 (Hart / West). The v1 approximation returned exactly 0 for
+    // N(-x) once N(x) rounded to 1, at x > ~8.3. Pinned here because it is the
+    // visible difference between the models on deep wings, and because a
+    // "cleanup" back to the reflection form would pass every other test.
+    try std.testing.expect(b76.normalCDF(-10.0) > 0.0);
+    try std.testing.expect(b76.normalCDF(-30.0) > 0.0);
+    try std.testing.expectEqual(@as(f64, 0.0), b76.normalCDF(-38.0));
+    try std.testing.expectEqual(@as(f64, 1.0), b76.normalCDF(38.0));
+    // And N(-x) from phi is N(x) with the sign flipped, to the bit.
     var x: f64 = 1e-8;
     while (x < 40.0) : (x *= 1.7) {
-        try std.testing.expectEqual(bits(1.0 - b76.normalCDF(x)), bits(b76.normalCDF(-x)));
-        try std.testing.expectEqual(bits(1.0 - b76.normalCDF(-x)), bits(b76.normalCDF(x)));
+        try std.testing.expectEqual(bits(b76.phi(x).neg), bits(b76.phi(-x).pos));
+        try std.testing.expectEqual(bits(b76.phi(x).pos), bits(b76.phi(-x).neg));
     }
 }
 

@@ -1,59 +1,40 @@
-//! cdf_delta.zig -- measure what swapping the normal CDF actually costs.
+//! cdf_delta.zig -- what the v1 -> v2 model change did to prices.
 //!
 //!   zig build cdf-delta
 //!
-//! The kernel uses Abramowitz & Stegun 26.2.17, a rational polynomial with
-//! |err| < 7.5e-8. Sooner or later someone proposes replacing it with erf(),
-//! which is more accurate, and the proposal sounds like a cleanup.
+//! v1 used Abramowitz & Stegun 26.2.17, a rational polynomial with
+//! |err| < 7.5e-8. v2 ships Hart's approximation (West 2005), ~1e-15, with
+//! the lower tail computed directly. The swap was proposed as a cleanup and
+//! adopted as a model change, by the owner of the P&L, on the strength of the
+//! numbers this tool prints.
 //!
-//! This tool answers the only question that matters: how far does the PRICE
-//! move. It replays every input in the golden fixture through both CDFs and
-//! reports the largest disagreement, absolute and relative.
-//!
-//! The answer is not "within tolerance" or "outside tolerance". There is no
-//! tolerance. The answer is a number, and someone with P&L responsibility
-//! decides whether they want it.
+//! It replays every input in the golden fixture through both CDFs and reports
+//! the largest disagreement in PRICE, absolute and relative. The answer is not
+//! "within tolerance" or "outside tolerance". There is no tolerance. The answer
+//! is a number, and someone with P&L responsibility decides whether they want
+//! it -- which, for v2, they did.
 
 const std = @import("std");
 const b76 = @import("black76");
 const fx = @import("fixture");
 const fixture_text = @embedFile("golden_fixture");
 
-/// A high-precision cumulative normal, accurate to roughly 1e-15 -- Hart's
-/// rational approximation (Hart, "Computer Approximations", 1968; the form used
-/// here is the one popularised by Graeme West, "Better approximations to
-/// cumulative normal functions", Wilmott, 2005).
-///
-/// This is the realistic upgrade candidate. It is genuinely better than
-/// Abramowitz & Stegun 26.2.17 by about seven decimal digits. The question this
-/// tool answers is not whether it is better -- it is -- but what adopting it
-/// would DO to prices already on the books.
-fn hartCDF(x: f64) f64 {
-    const y = @abs(x);
-    var c: f64 = 0.0;
-    if (y <= 37.0) {
-        const e = @exp(-y * y / 2.0);
-        if (y < 7.07106781186547) {
-            var n: f64 = 3.52624965998911e-02 * y + 0.700383064443688;
-            n = n * y + 6.37396220353165;
-            n = n * y + 33.912866078383;
-            n = n * y + 112.079291497871;
-            n = n * y + 221.213596169931;
-            n = n * y + 220.206867912376;
-            var d: f64 = 8.83883476483184e-02 * y + 1.75566716318264;
-            d = d * y + 16.064177579207;
-            d = d * y + 86.7807322029461;
-            d = d * y + 296.564248779674;
-            d = d * y + 637.333633378831;
-            d = d * y + 793.826512519948;
-            d = d * y + 440.413735824752;
-            c = e * n / d;
-        } else {
-            const f = y + 1.0 / (y + 2.0 / (y + 3.0 / (y + 4.0 / (y + 0.65))));
-            c = e / (f * 2.506628274631);
-        }
-    }
-    return if (x > 0.0) 1.0 - c else c;
+/// The v1 model: Abramowitz & Stegun 26.2.17, kept here verbatim as the
+/// historical reference. Note the lower tail as `1 - n_pos`: once n_pos rounds
+/// to 1, the tail is exactly 0.
+fn v1CDF(x: f64) f64 {
+    const b1: f64 = 0.319381530;
+    const b2: f64 = -0.356563782;
+    const b3: f64 = 1.781477937;
+    const b4: f64 = -1.821255978;
+    const b5: f64 = 1.330274429;
+    const p: f64 = 0.2316419;
+    const inv_sqrt_2pi: f64 = 0.3989422804014327;
+    const ax = @abs(x);
+    const k = 1.0 / (1.0 + p * ax);
+    const pdf = inv_sqrt_2pi * @exp(-0.5 * ax * ax);
+    const n_pos = 1.0 - pdf * (((((b5 * k + b4) * k + b3) * k + b2) * k + b1) * k);
+    return if (x >= 0.0) n_pos else 1.0 - n_pos;
 }
 
 fn priceWith(comptime cdf: fn (f64) f64, in: b76.Input) ?f64 {
@@ -105,8 +86,8 @@ pub fn main(init: std.process.Init) !void {
     var compared: usize = 0;
 
     for (vs) |v| {
-        const a = priceWith(b76.normalCDF, v.input()) orelse continue;
-        const b = priceWith(hartCDF, v.input()) orelse continue;
+        const a = priceWith(v1CDF, v.input()) orelse continue;
+        const b = priceWith(b76.normalCDF, v.input()) orelse continue;
         compared += 1;
         const gap = @abs(a - b);
         abs.update(gap, a, v);
@@ -123,8 +104,9 @@ pub fn main(init: std.process.Init) !void {
     var stdout = std.Io.File.stdout().writer(io, &buf);
     const w = &stdout.interface;
     try w.print(
-        \\Abramowitz & Stegun 26.2.17  vs  Hart high-precision normal CDF
+        \\v1 Abramowitz & Stegun 26.2.17  vs  v2 (shipped) Hart / West normal CDF
         \\  vectors compared          : {d} (degenerate branches skipped -- they never call the CDF)
+        \\  gaps are |v1 price - v2 price|; ratios are relative to the v1 price
         \\
     , .{compared});
     if (abs.at) |v| {
@@ -152,9 +134,10 @@ pub fn main(init: std.process.Init) !void {
     }
     try w.print(
         \\
-        \\Each of those is a real difference in a real price. This is
-        \\why the fixture has no tolerance band: a band wide enough to admit this
-        \\swap would hide it, and hiding it is the failure mode.
+        \\Each of those is a real difference in a real price. This is why the
+        \\fixture has no tolerance band: a band wide enough to admit this swap
+        \\would hide it, and hiding it is the failure mode. v2 adopted the swap
+        \\knowingly; the v1 fixture is kept in vectors/ so the diff is on record.
         \\
     , .{});
     try w.flush();
