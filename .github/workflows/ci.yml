@@ -5,8 +5,12 @@
 # that you cannot read here.
 name: ci
 
+# Branch pushes and PRs only — a tag adds no code, and its commit was already
+# gated when the branch push ran. (A bare `push:` also fires on tag refs; the
+# v1.0.0 tag spawned a doomed duplicate matrix run that way, 2026-08-31.)
 on:
   push:
+    branches: ["**"]
   pull_request:
 
 env:
