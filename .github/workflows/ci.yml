@@ -13,6 +13,12 @@ on:
     branches: ["**"]
   pull_request:
 
+# Nothing here writes back -- no releases, no comments, no checks API -- so the
+# workflow token gets the only permission the jobs can justify: reading the
+# repository it checks out.
+permissions:
+  contents: read
+
 env:
   ZIG_VERSION: "0.16.0"
 
