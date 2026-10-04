@@ -14,7 +14,7 @@
         "tools",
         "tests",
         "vectors",
-        "LICENSE",
+        "LICENSE.md",
         "README.md",
     },
     .dependencies = .{},

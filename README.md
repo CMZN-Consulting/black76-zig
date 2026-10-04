@@ -578,7 +578,7 @@ the number is in the table above rather than in this sentence.
 
 ## Licence
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE.md](LICENSE.md).
 
 ---
 
