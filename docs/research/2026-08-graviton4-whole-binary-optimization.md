@@ -1,5 +1,7 @@
 # Whole-binary optimisation of a Zig C-ABI pricing kernel on AWS Graviton4
 
+> Note of 2026-10-12: every number below was measured with the Zig 0.16.0 toolchain, as the text says. The toolchain moved to 0.17.0 on 2026-10-12 (v1.1.0); a re-measurement on the same hardware lives in `2026-10-graviton4-whole-binary-optimization.md` once it exists, and this file stays as the record of the August run.
+
 *A literature review with priors, and the instrument that tests them. 30 August 2026.*
 
 ---

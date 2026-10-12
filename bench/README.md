@@ -23,7 +23,7 @@ has the literature and the priors; this file is the operating manual.
 ```sh
 git clone https://github.com/CMZN-Consulting/black76-zig && cd black76-zig
 git checkout research/graviton4-whole-binary-optimization
-bash bench/setup_graviton.sh          # zig 0.16.0, perf, python3, taskset, llvm-bolt (Ubuntu)
+bash bench/setup_graviton.sh          # zig 0.17.0, perf, python3, taskset, llvm-bolt (Ubuntu)
 sudo sysctl kernel.perf_event_paranoid=1
 bench/run_matrix.sh                    # ~10-15 min at the defaults; prints the report
 ```

@@ -73,8 +73,8 @@ mkdir -p "$OUT/build" "$OUT/perf"
 log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*" | tee -a "$OUT/run.log"; }
 
 zig_version=$("$ZIG" version)
-if [ "$zig_version" != "0.16.0" ]; then
-  log "WARNING: zig $zig_version is not the pinned 0.16.0; the fixture is captured by 0.16.0 and a different compiler is allowed to disagree"
+if [ "$zig_version" != "0.17.0" ]; then
+  log "WARNING: zig $zig_version is not the pinned 0.17.0; the fixture is captured by 0.17.0 and a different compiler is allowed to disagree"
 fi
 
 arch=$(uname -m)

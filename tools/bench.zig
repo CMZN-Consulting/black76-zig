@@ -32,15 +32,16 @@ const Arrays = struct {
 
     fn alloc(gpa: std.mem.Allocator, n: usize) !Arrays {
         var a: Arrays = undefined;
-        inline for (@typeInfo(Arrays).@"struct".fields) |field| {
-            @field(a, field.name) = try gpa.alloc(std.meta.Child(field.type), n);
+        const info = @typeInfo(Arrays).@"struct";
+        inline for (info.field_names, info.field_types) |name, T| {
+            @field(a, name) = try gpa.alloc(std.meta.Child(T), n);
         }
         return a;
     }
 
     fn free(a: Arrays, gpa: std.mem.Allocator) void {
-        inline for (@typeInfo(Arrays).@"struct".fields) |field| {
-            gpa.free(@field(a, field.name));
+        inline for (@typeInfo(Arrays).@"struct".field_names) |name| {
+            gpa.free(@field(a, name));
         }
     }
 

@@ -94,7 +94,7 @@ guard order is five `if`s in a row that nobody has to reconstruct.
 
 ## Try it
 
-Needs [Zig 0.16.0](https://ziglang.org/download/). Nothing else — no package registry, no network,
+Needs [Zig 0.17.0](https://ziglang.org/download/). Nothing else — no package registry, no network,
 no C library, and since v2 not even the compiler's own `exp` and `log`.
 
 ```sh
@@ -256,8 +256,8 @@ An honest golden-vector file has to say what it is a golden vector *of*. This on
 specific compiler, and the header line of the fixture records exactly which:
 
 ```json
-{"header":1,"schema":"black76-golden/3","zig_version":"0.16.0",
- "target":"x86_64-linux-gnu","cpu":"raptorlake","optimize":"ReleaseFast", ...}
+{"header":1,"schema":"black76-golden/3","zig_version":"0.17.0",
+ "target":"x86_64-linux-gnu","cpu":"raptorlake","optimize":"fast", ...}
 ```
 
 We measured how much of that actually matters. Regenerating across **four optimisation modes ×
@@ -528,7 +528,9 @@ tools/assoc_delta.zig             the v2 -> v3' re-association impact measuremen
 tools/bench.zig                   ns/option
 tests/golden_test.zig             replays the fixture; 16 tests
 tests/libm_test.zig               exp/log vs compiler_rt; 4M samples under test, 1e9 under soak
-vectors/black76-golden.ndjson     3,516 vectors, schema 3, 1.5 MB
+vectors/black76-golden.ndjson     3,516 vectors, schema 3, 1.5 MB, captured by zig 0.17.0
+vectors/black76-golden.v3-zig-0.16.0.ndjson  the same 3,516 vectors as captured by zig 0.16.0, on record;
+                                  the two differ in their header line only, which is the finding
 vectors/black76-golden.v2.ndjson  the v2 numbers, on record
 vectors/black76-golden.v1.ndjson  the v1 numbers, on record
 bench/                            whole-binary optimisation harness for Graviton4 (bench/README.md)
