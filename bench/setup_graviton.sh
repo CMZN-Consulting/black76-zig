@@ -3,7 +3,7 @@
 #
 #   bash bench/setup_graviton.sh            # Ubuntu 22.04/24.04 or Amazon Linux 2023, aarch64
 #
-# Installs: Zig 0.16.0 (the pinned toolchain, into ~/zig), perf, python3,
+# Installs: Zig 0.17.0 (the pinned toolchain, into ~/zig), perf, python3,
 # util-linux (taskset), binutils (readelf), and LLVM BOLT 21 where a package
 # exists (Ubuntu via apt.llvm.org). Nothing is installed system-wide except
 # distro packages; Zig lives in $HOME/zig and is added to PATH via ~/.profile.
@@ -14,7 +14,7 @@
 
 set -euo pipefail
 
-ZIG_VERSION=0.16.0
+ZIG_VERSION=0.17.0
 arch=$(uname -m)
 if [ "$arch" != "aarch64" ]; then
   echo "setup_graviton.sh: this is $arch, not aarch64. Nothing to do (cross builds only need Zig)." >&2
