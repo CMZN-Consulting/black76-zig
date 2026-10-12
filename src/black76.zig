@@ -78,15 +78,15 @@ pub const Kind = enum(u8) {
     call = 1,
 
     pub fn fromIsCall(is_call: bool) Kind {
-        return @enumFromInt(@intFromBool(is_call));
+        return @fromBackingInt(@intCast(@intFromBool(is_call)));
     }
 };
 
 comptime {
     // The zero-copy view in `black76_greeks_batch` depends on these.
     assert(@sizeOf(Kind) == @sizeOf(bool));
-    assert(@intFromEnum(Kind.call) == @intFromBool(true));
-    assert(@intFromEnum(Kind.put) == @intFromBool(false));
+    assert(@backingInt(Kind.call) == @intFromBool(true));
+    assert(@backingInt(Kind.put) == @intFromBool(false));
 }
 
 /// One option to price. `ttm` is in years.
@@ -494,7 +494,7 @@ inline fn priceLanes(inputs: BatchInputs, outputs: BatchOutputs, i: usize) void 
     const sigma: V = inputs.sigmas[i..][0..batch_lanes].*;
     const ttm: V = inputs.ttms[i..][0..batch_lanes].*;
     const kind_bytes: @Vector(batch_lanes, u8) = @as([batch_lanes]u8, @bitCast(inputs.kinds[i..][0..batch_lanes].*));
-    const is_call = kind_bytes == @as(@Vector(batch_lanes, u8), @splat(@intFromEnum(Kind.call)));
+    const is_call = kind_bytes == @as(@Vector(batch_lanes, u8), @splat(@backingInt(Kind.call)));
 
     // The five guards, as lane masks. Any lane that trips one is recomputed
     // below by the scalar kernel, which is the authority on what they return

@@ -349,7 +349,7 @@ fn parseArgs(args: []const []const u8) !Options {
                 o.workloads = .{ true, true, true };
             } else {
                 const w = std.meta.stringToEnum(Workload, v) orelse return error.BadWorkload;
-                o.workloads[@intFromEnum(w)] = true;
+                o.workloads[@backingInt(w)] = true;
             }
         } else if (std.mem.eql(u8, a, "--iters")) {
             o.iters = try std.fmt.parseInt(u32, v, 10);
@@ -430,7 +430,7 @@ pub fn main(init: std.process.Init) !u8 {
     // -- Timing ------------------------------------------------------------
     const samples = try gpa.alloc(u64, opts.iters);
     inline for (.{ Workload.fixture, Workload.grid, Workload.scalar }) |w| {
-        if (opts.workloads[@intFromEnum(w)]) {
+        if (opts.workloads[@backingInt(w)]) {
             const set: *Set = if (w == .fixture) &fixture_set else &grid;
             set.clearOutputs();
             for (0..opts.warmup) |_| dispatch(opts.mode, kernel, w, set);

@@ -121,8 +121,8 @@ pub fn main(init: std.process.Init) !void {
         const priced = @abs(old.price) >= 0.001 * v.f;
 
         var moved_here = false;
-        inline for (@typeInfo(Field).@"enum".fields, 0..) |field, i| {
-            const f: Field = @enumFromInt(field.value);
+        inline for (@typeInfo(Field).@"enum".field_values, 0..) |value, i| {
+            const f: Field = @fromBackingInt(@intCast(value));
             const a = get(old, f);
             const bb = get(new, f);
             stats[i].observe(a, bb, v, priced);
@@ -153,20 +153,20 @@ pub fn main(init: std.process.Init) !void {
         \\
     , .{ vs.len, any_moved, toward_zero_sign, "output", "moved", "max |delta|", "max ulps", "bps priced", "bps any" });
 
-    inline for (@typeInfo(Field).@"enum".fields, 0..) |field, i| {
+    inline for (@typeInfo(Field).@"enum".field_names, 0..) |name, i| {
         try w.print("  {s:<8} {d:>7}  {e:>14.6}  {d:>10}  {e:>14.4}  {e:>14.4}\n", .{
-            field.name, stats[i].moved, stats[i].max_abs, stats[i].max_ulp, stats[i].worst_bps, stats[i].worst_bps_any,
+            name, stats[i].moved, stats[i].max_abs, stats[i].max_ulp, stats[i].worst_bps, stats[i].worst_bps_any,
         });
     }
 
-    inline for (@typeInfo(Field).@"enum".fields, 0..) |field, i| {
+    inline for (@typeInfo(Field).@"enum".field_names, 0..) |name, i| {
         if (stats[i].max_abs_at) |v| {
             try w.print(
                 \\
                 \\  {s}: worst absolute move {e:.6}
                 \\      at F={d} K={d} sigma={d} T={d}y {s}  [{s}]
                 \\
-            , .{ field.name, stats[i].max_abs, v.f, v.k, v.s, v.t, @tagName(v.kind), v.g });
+            , .{ name, stats[i].max_abs, v.f, v.k, v.s, v.t, @tagName(v.kind), v.g });
         }
         if (stats[i].worst_bps_at) |v| {
             try w.print(
@@ -174,7 +174,7 @@ pub fn main(init: std.process.Init) !void {
                 \\      at F={d} K={d} sigma={d} T={d}y {s}  [{s}]
                 \\      -- restricted to options worth >= 0.1% of the forward
                 \\
-            , .{ field.name, stats[i].worst_bps, stats[i].worst_bps_value, v.f, v.k, v.s, v.t, @tagName(v.kind), v.g });
+            , .{ name, stats[i].worst_bps, stats[i].worst_bps_value, v.f, v.k, v.s, v.t, @tagName(v.kind), v.g });
         }
     }
 

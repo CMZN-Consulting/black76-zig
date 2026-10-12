@@ -106,7 +106,7 @@ pub fn build(b: *std.Build) void {
 
     const run_gen = b.addRunArtifact(gen);
     run_gen.setCwd(b.path("."));
-    if (b.args) |args| run_gen.addArgs(args);
+    run_gen.addPassthruArgs(); // zig 0.17: the arguments after `--`, formerly `b.args`
     b.step("generate", "Re-capture vectors/black76-golden.ndjson").dependOn(&run_gen.step);
 
     // -- Tests: the golden replay, plus the reader's own unit tests ----------
@@ -248,6 +248,6 @@ pub fn build(b: *std.Build) void {
     bench_driver_step.dependOn(&b.addInstallArtifact(shared, .{}).step);
 
     const run_bench_driver = b.addRunArtifact(bench_driver);
-    if (b.args) |args| run_bench_driver.addArgs(args);
+    run_bench_driver.addPassthruArgs(); // zig 0.17: the arguments after `--`, formerly `b.args`
     b.step("bench-driver-run", "Build and run the benchmark driver (pass flags after --)").dependOn(&run_bench_driver.step);
 }

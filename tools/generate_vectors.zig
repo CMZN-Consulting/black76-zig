@@ -77,8 +77,8 @@ const group_counts = .{
 
 pub const case_count: u32 = blk: {
     var total: u32 = 0;
-    for (@typeInfo(@TypeOf(group_counts)).@"struct".fields) |field| {
-        total += @field(group_counts, field.name);
+    for (@typeInfo(@TypeOf(group_counts)).@"struct".field_names) |name| {
+        total += @field(group_counts, name);
     }
     break :blk total;
 };

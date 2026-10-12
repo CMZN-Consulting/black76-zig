@@ -94,7 +94,7 @@ guard order is five `if`s in a row that nobody has to reconstruct.
 
 ## Try it
 
-Needs [Zig 0.16.0](https://ziglang.org/download/). Nothing else — no package registry, no network,
+Needs [Zig 0.17.0](https://ziglang.org/download/). Nothing else — no package registry, no network,
 no C library, and since v2 not even the compiler's own `exp` and `log`.
 
 ```sh
@@ -256,8 +256,8 @@ An honest golden-vector file has to say what it is a golden vector *of*. This on
 specific compiler, and the header line of the fixture records exactly which:
 
 ```json
-{"header":1,"schema":"black76-golden/3","zig_version":"0.16.0",
- "target":"x86_64-linux-gnu","cpu":"raptorlake","optimize":"ReleaseFast", ...}
+{"header":1,"schema":"black76-golden/3","zig_version":"0.17.0",
+ "target":"x86_64-linux-gnu","cpu":"raptorlake","optimize":"fast", ...}
 ```
 
 We measured how much of that actually matters. Regenerating across **four optimisation modes ×
